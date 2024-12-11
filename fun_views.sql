@@ -11152,6 +11152,19 @@ ALTER TABLE connecthub."GrievanceInfo" ADD "DepartmentCode" int4 NULL;
 ALTER TABLE connecthub."GrievanceInfo" ADD "Department" text NULL;
 
 
+UPDATE connecthub."GrievanceInfo" gi
+SET 
+    "DepartmentCode" = b."HODKey"::int,
+    "Department" = b."HOD"
+FROM 
+    (SELECT DISTINCT "ClientKey", "HODKey", "HOD" 
+     FROM masters."Subject") b
+WHERE 
+    gi."ClientKey" = b."ClientKey"
+    AND b."HODKey"::text = gi."GrievanceType"::text
+    AND gi."GrievanceType" IS NOT NULL;
+
+
 
 
 ALTER TABLE connecthub."GrievanceInfo_log" ADD "SubSubjectCode" int4 NULL;
@@ -14461,7 +14474,7 @@ $function$
 
 
 
-DROP FUNCTION connecthub."ProcCrudRequestInformation"(int4, bpchar, varchar, text, int4, text, text, json, json, json, text, json, int4, text, varchar, varchar, int4, int4, varchar, int4, varchar, bool, varchar, json, text, varchar, text, int4, varchar, json, bool, varchar);
+DROP FUNCTION connecthub."ProcCrudRequestInformation";
 
 CREATE OR REPLACE FUNCTION connecthub."ProcCrudRequestInformation"(_clientkey integer, _lang character, _operation character varying, _userid text, _grievancetype integer, _grievancetext text, _attachments text, _requestedfor json, _requestedby json, _referedby json, _tags text, _additionalinfo json, _grievancestatus integer, _remarks text, _createdby character varying, _modifiedby character varying, _offset integer, _limit integer, _id character varying, _role integer, _priority character varying, _islocationspecific boolean, _locationgranularity character varying, _locationkey json, _summarizedtext text, _grievanceby character varying, _audioattachment text, _subsubjectcode integer, _partycadrestatus character varying, _partycadredetails json, _istemplate boolean, _issuetype character varying)
  RETURNS text
@@ -19543,3 +19556,32 @@ END;
 $function$
 ;
 
+
+UPDATE connecthub."PageList_Lang"
+SET "ClientKey"=1, "PageGroupKey"=1, "PageKey"=1, "Lang"='en', "Page"='Grievances', "Title"='Grievances / Requests', "TagContent"=NULL, "Description"=NULL
+WHERE "ClientKey"=1 AND "PageGroupKey"=1 AND "PageKey"=1 AND "Lang"='en' AND "Page"='Grievances';
+
+
+UPDATE connecthub."GrievanceTemplates"
+SET "ClientKey"=1, "Lang"='en', "ID"=1, "Name"='Default Grievance / Request', "IssueType"='Grievance, Request', "DepartmentID"=NULL, "Department"=NULL, "Priority"='Low', "GrievanceText"=NULL, "IsTemplate"=false
+WHERE "ClientKey"=1 AND "Lang"='en' AND "ID"=1 ;
+
+
+
+-- hubviews.vw_requestor_grievance_details source
+
+CREATE OR REPLACE VIEW hubviews.vw_requestor_grievance_details
+AS SELECT rrl."ClientKey" AS client_key,
+    rrl."Lang" AS lang,
+    rrl."ReferenceID" AS id,
+        CASE
+            WHEN rrl."ReferenceType"::text = 'Individual'::text THEN 7
+            ELSE 9
+        END AS requestor_type,
+    rrl."ReferenceType" AS requestor_type_name,
+--    json_agg(json_build_object('GrievanceKey', gi."GrievanceKey", 'Department', s."Department", 'HOD', s."HOD", 'Subject', s."Subject", 'SubSubject', s."SubSubject", 'CreatedOn', gi."CreatedOn") ORDER BY gi."CreatedOn" DESC) AS grievance_details
+    json_agg(json_build_object('GrievanceKey', gi."GrievanceKey", 'Department', gi."Department", 'CreatedOn', gi."CreatedOn") ORDER BY gi."CreatedOn" DESC) AS grievance_details
+   FROM connecthub."RequestRequestorList" rrl
+     JOIN connecthub."GrievanceInfo" gi ON gi."ClientKey" = rrl."ClientKey" AND gi."Lang" = rrl."Lang" AND gi."GrievanceKey"::text = rrl."GrievanceKey"::text
+--     LEFT JOIN masters."Subject" s ON s."ClientKey" = gi."ClientKey" AND s."Lang" = gi."Lang" AND s."SubSubjectKey" = gi."SubSubjectCode"::text
+  GROUP BY rrl."ClientKey", rrl."Lang", rrl."ReferenceID", rrl."ReferenceType";
