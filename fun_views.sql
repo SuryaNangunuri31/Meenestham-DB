@@ -9215,7 +9215,8 @@ begin
 		into  _return 
 		from connecthub."GetEmailList"(	
 			_ClientKey:=(_input->'global'->>'ClientKey')::int, 
-			_UserID:=(_input->'params'->>'UserID')
+			_UserID:=(_input->'params'->>'UserID'),
+			_searchpattern:=(_input->'params'->>'SearchPattern')
 			);
 
 	elsif _input->>'requestURI' = 'PartyCadreSearch' then 
@@ -19585,3 +19586,1871 @@ AS SELECT rrl."ClientKey" AS client_key,
      JOIN connecthub."GrievanceInfo" gi ON gi."ClientKey" = rrl."ClientKey" AND gi."Lang" = rrl."Lang" AND gi."GrievanceKey"::text = rrl."GrievanceKey"::text
 --     LEFT JOIN masters."Subject" s ON s."ClientKey" = gi."ClientKey" AND s."Lang" = gi."Lang" AND s."SubSubjectKey" = gi."SubSubjectCode"::text
   GROUP BY rrl."ClientKey", rrl."Lang", rrl."ReferenceID", rrl."ReferenceType";
+
+
+
+ DROP FUNCTION connecthub."GetEmailList";
+
+CREATE OR REPLACE FUNCTION connecthub."GetEmailList"(_clientkey integer, _userid character varying, _searchpattern text)
+ RETURNS json
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    _return JSON;
+    _state TEXT;
+    _msg TEXT;
+    _detail TEXT;
+    _hint TEXT;
+    _context TEXT;
+BEGIN
+    -- Main logic: select and aggregate contact information as JSON
+    select jsonb_agg(row_to_json(a)) into _return from 
+	(select *, row_number() over(partition by "FullName", "Contact", "Email" ) rn  from
+	(select "FullName", jsonb_array_elements("MobileNumber")->>'Number' "Contact", 
+	jsonb_array_elements("Email")->>'Address' "Email"
+	from connecthub."ContactsInfo" ci where "ClientKey" = _clientkey ) as a
+	where "Email" is not null ) as a
+	where rn = 1 
+--	and case when _searchpattern is not null then "Email" ilike '%'||quote_literal(_searchpattern)||'%' else 1=1 end;
+	AND ("Email" ILIKE '%' || COALESCE(_searchpattern, '') || '%');
+
+    -- Return successful JSON object
+	_return = json_build_object('Status','Success', 'Details',_return);
+
+return _return;
+
+EXCEPTION
+    WHEN others THEN
+        -- Capture exception details using GET STACKED DIAGNOSTICS
+        GET STACKED DIAGNOSTICS
+            _state   = returned_sqlstate,
+            _msg     = message_text,
+            _detail  = pg_exception_detail,
+            _hint    = pg_exception_hint,
+            _context = pg_exception_context;
+
+        -- Insert exception details into the EXCEPTION_LOG table
+        INSERT INTO connecthub."EXCEPTION_LOG" 
+            ("procedure", "state", "msg", "detail", "hint", "context")
+        VALUES
+            ('GetEmailList', _state, _msg, _detail, _hint, _context);
+
+        -- Build the failure return object
+        _return = json_build_object('Status','Failed','Details', json_build_object('State',_state, '_msg', _msg , '_detail', _detail, '_hint', _detail, '_context', _context));
+
+        -- Return the failure JSON object
+        RETURN _return;
+END;
+$function$
+;
+
+
+INSERT INTO masters."Status"
+("ClientKey", "StatusKey", "Status", "Color", "Relation", "Action", rolerelation, "SendNotificationdTo")
+select unnest(array[1,3,4]), 9, 'Corrected', 'draft', null, 'Request_Note', '1,2,3,4', '1,2,5';
+
+update connecthub."GrievanceInfo" gi 
+set "GrievanceStatus" = 3
+where "GrievanceStatus" = 6;
+
+
+
+DROP FUNCTION connecthub."ProcStatusUpdate";
+
+CREATE OR REPLACE FUNCTION connecthub."ProcStatusUpdate"(_clientkey integer, _lang character, _requestid character varying, _statuskey integer, _note text, _userkey text)
+ RETURNS json
+ LANGUAGE plpgsql
+AS $function$
+declare
+-- variable declaration
+	_return json;
+	_RID varchar(50);
+--exception variables
+    _state   TEXT;
+    _msg     TEXT;
+    _detail  TEXT;
+    _hint    TEXT;
+    _context TEXT;
+begin
+	
+
+--	update connecthub."RequestRecords" set "RequestStatus" = _StatusKey, "ModifiedBy" = _UserKey,
+--	"ModifiedOn" = current_timestamp, "Note" =_Note, "ClosedOn" = case when "RequestStatus" in (4,5) then current_timestamp else null::timestamp end
+--	where "RequestID"= _RequestID and "ClientKey" = _ClientKey
+--	returning "RequestID" into _RID;
+
+if _statuskey = 6 then 
+
+	_statuskey = 3;
+
+elsif _statuskey = 9 then 
+
+	select 
+		"GrievanceStatus"
+		into _statuskey
+	from (
+	select "GrievanceStatus","Status" , row_number() over(order by "ChangedAt" desc, "LogID" desc) rn from connecthub."GrievanceInfo_log" gil 
+	where "GrievanceKey" = _requestid
+	and "OperationType" = 'UPDATE'
+	and "OldRecord"->>'GrievanceStatus' <> "NewRecord"->>'GrievanceStatus' 
+	order by "ChangedAt" desc, "LogID" desc
+	) a
+	where rn = 1;
+
+end if;
+
+	update connecthub."GrievanceInfo" set "GrievanceStatus" = _StatusKey, 
+	"Status" = (SELECT "Status" FROM masters."Status" WHERE "StatusKey" = _StatusKey and "ClientKey"=_ClientKey),
+	"ModifiedBy" = _UserKey,
+	"ModifiedUserName" = (SELECT "UserName" FROM connecthub."UserInfo" WHERE "UserKey" = _UserKey AND "ClientKey" = _ClientKey),
+	"ModifiedOn" = current_timestamp, "Note" =_Note
+	where "GrievanceKey" = _RequestID and "ClientKey" = _ClientKey
+	returning "GrievanceKey" into _RID;
+
+
+--	_return = json_build_object('Status','Success', 'Details', json_build_object('Status', 'Success', 'RequestID', _RID));
+	_return = json_build_object('Status','Success', 'Details', json_build_object('List',json_build_object('RequestID',_RID)));
+
+
+	return _return;
+	
+exception when others then 
+
+    get stacked diagnostics
+        _state   = returned_sqlstate,
+        _msg     = message_text,
+        _detail  = pg_exception_detail,
+        _hint    = pg_exception_hint,
+        _context = pg_exception_context;
+       
+            
+     insert into connecthub."EXCEPTION_LOG" ("procedure", "state","msg", "detail", "hint", "context")
+     values('ProcCommentInfo', _state, _msg, _detail, _hint, _context);
+    
+      
+	_return = json_build_object('Status','Failed','Details', json_build_object('State',_state, '_msg', _msg , '_detail', _detail, '_hint', _detail, '_context', _context));
+
+	return _return;
+
+end; $function$
+;
+
+-- DROP FUNCTION hubviews.fn_grievancedataset();
+
+CREATE OR REPLACE FUNCTION hubviews.fn_grievancedataset()
+ RETURNS TABLE("ClientKey" integer, "Lang" character, grievance_key character varying, grievance_type_key integer, grievance_type text, grievance_text text, no_of_attachments_in_grievance integer, association_id integer[], requested_for json, requested_by json, refered_by json, requestor_ac_key integer[], requestor_state_key integer[], requestor_district_key integer[], requestor_mandal_key integer[], requestor_village_key integer[], requestor_type integer[], gender text[], mobile text[], email text[], requestor_tags text[], age_group text[], tags text[], additional_info json, priority character varying, sla text, due_date date, grievance_status_key integer, grievance_status character varying, is_active boolean, remarks text, age_in_days numeric, age_category text, created_on timestamp without time zone, modified_on timestamp without time zone, created_by_key character varying, created_by character varying, modified_by character varying, note text, location_granularity character varying, request_state_key integer, request_state text, request_district_key integer, request_district text, request_pc_key integer, request_pc_name character varying, request_ac_key integer, request_ac_name character varying, request_mandal_key integer, request_mandal text, request_village_key integer, request_village text, assignee_to_key text, assigned_to character varying, source character varying, department text, departmentkey text, hod text, hodkey text, subject text, subjectkey text, subsubject text, subsubjectkey integer, party_cadre_status character varying, booth_incharge text, booth_incharge_mobile text, unit_incharge text, unit_incharge_mobile text, cluster_incharge text, cluster_incharge_mobile text)
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+    RETURN QUERY
+    WITH grievance_data AS (
+         SELECT a_1."ClientKey",
+            a_1."Lang",
+            a_1."GrievanceKey",
+            a_1."GrievanceType",
+            a_1."GrievanceTypeName",
+            a_1."GrievanceText",
+            a_1."Attachments",
+            b."ReferenceRelation",
+                CASE
+                    WHEN b."ReferenceType"::text = 'Association'::text THEN b."ReferenceID"::text
+                    ELSE NULL::text
+                END AS "AssociationID",
+            json_build_object('Sno', row_number() OVER (PARTITION BY a_1."GrievanceKey", b."ReferenceRelation"), 'ID', b."ReferenceID", 'Label',
+                CASE
+                    WHEN b."ReferenceType"::text = 'Association'::text THEN ((b."Name"::text || ' ('::text) || b."ReferenceType"::text) || ')'::text
+                    WHEN b."ReferenceType"::text = 'Individual'::text THEN ((((COALESCE(b."RequestorFirstName"::text, ''::text) || ' '::text) || COALESCE(b."RequestorLastName"::text, ''::text)) || ' ('::text) || b."ReferenceType"::text) || ')'::text
+                    ELSE NULL::text
+                END, 'ReferenceType', b."ReferenceType") AS obj,
+            b."ConstituencyKey"::text AS "RequestorACKey",
+            b."StateKey"::text AS "RequestorStateKey",
+            b."DistrictKey"::text AS "RequestorDistrictKey",
+            b."MandalKey"::text AS "RequestorMandalKey",
+            b."VillageKey"::text AS "RequestorVillageKey",
+            a_1."Tags",
+            a_1."AdditionalInfo",
+            a_1."Priority",
+                CASE
+                    WHEN a_1."DueDate" > CURRENT_DATE THEN 'Beyond SLA'::text
+                    ELSE 'Within SLA'::text
+                END AS sla,
+            a_1."DueDate",
+            a_1."GrievanceStatus",
+            s_1_1."Status",
+            a_1."IsActive",
+            a_1."Remarks",
+            EXTRACT(day FROM CURRENT_DATE::timestamp without time zone - a_1."CreatedOn") AS age_in_days,
+            a_1."CreatedOn",
+            a_1."ModifiedOn",
+            a_1."CreatedBy",
+            a_1."CreatedUserName",
+            a_1."ModifiedUserName",
+            a_1."Note",
+            a_1."IsLocationSpecific",
+            a_1."LocationGranularity",
+            a_1."LocationKey",
+            b."RequestorType"::text AS "RequestorType",
+                CASE
+                    WHEN b."Age"::text::integer < 18 THEN 'Minor'::text
+                    WHEN b."Age"::text::integer >= 18 AND b."Age"::text::integer <= 25 THEN 'AgeGroup(18-25)'::text
+                    WHEN b."Age"::text::integer >= 26 AND b."Age"::text::integer <= 30 THEN 'AgeGroup(26-30)'::text
+                    WHEN b."Age"::text::integer >= 31 AND b."Age"::text::integer <= 35 THEN 'AgeGroup(31-35)'::text
+                    WHEN b."Age"::text::integer >= 36 AND b."Age"::text::integer <= 40 THEN 'AgeGroup(36-40)'::text
+                    WHEN b."Age"::text::integer >= 41 AND b."Age"::text::integer <= 45 THEN 'AgeGroup(41-45)'::text
+                    WHEN b."Age"::text::integer >= 46 AND b."Age"::text::integer <= 50 THEN 'AgeGroup(46-50)'::text
+                    WHEN b."Age"::text::integer >= 51 AND b."Age"::text::integer <= 55 THEN 'AgeGroup(51-55)'::text
+                    WHEN b."Age"::text::integer >= 56 AND b."Age"::text::integer <= 60 THEN 'AgeGroup(56-60)'::text
+                    WHEN b."Age"::text::integer >= 61 AND b."Age"::text::integer <= 65 THEN 'AgeGroup(61-65)'::text
+                    WHEN b."Age"::text::integer >= 66 AND b."Age"::text::integer <= 70 THEN 'AgeGroup(66-70)'::text
+                    WHEN b."Age"::text::integer >= 71 AND b."Age"::text::integer <= 75 THEN 'AgeGroup(71-75)'::text
+                    WHEN b."Age"::text::integer > 75 THEN 'AgeGroup(>75)'::text
+                    ELSE NULL::text
+                END AS "AgeGroup",
+            b."Gender"::text AS "Gender",
+            ((COALESCE(b."Mobile"::text, ''::text) || COALESCE(','::text || b."AlternateMobile"::text, ''::text)) || COALESCE(','::text || b."RelationContact"::text, ''::text)) || COALESCE(','::text || b."RelationAlternateContact"::text, ''::text) AS "Mobile",
+            b."Email"::text AS "Email",
+            b."Occupation"::text AS "Occupation",
+            b."Tags"::text AS "RequestorTags",
+            a_1."AssignedTo",
+            u."UserName" AS "AssignedName",
+            a_1."Source",
+            s_1."Department" AS "HOD",
+            s_1."DepartmentKey" AS "HODKey",
+            a_1."Department" AS "Department",
+            a_1."DepartmentCode"::text AS "DepartmentKey",
+            s_1."Subject",
+            s_1."SubjectKey",
+            s_1."SubSubject",
+            a_1."SubSubjectCode",
+            a_1."PartyCadreStatus",
+            v_1.booth_incharge,
+            v_1.booth_incharge_mobile,
+            v_1.unit_incharge,
+            v_1.unit_incharge_mobile,
+            v_1.cluster_incharge,
+            v_1.cluster_incharge_mobile
+           FROM connecthub."GrievanceInfo" a_1
+             LEFT JOIN ( SELECT COALESCE(a_2."HODKey"::text, b_1."HODKey") AS "HODKey",
+                    COALESCE(a_2."HOD", b_1."HOD") AS "HOD",
+                    COALESCE(a_2."DepartmentKey"::text, b_1."DepartmentKey") AS "DepartmentKey",
+                    COALESCE(a_2."Department", b_1."Department") AS "Department",
+                    b_1."SubjectKey",
+                    b_1."Subject",
+                    COALESCE(a_2."ID"::text, b_1."SubSubjectKey") AS "SubSubjectKey",
+                    COALESCE(a_2."GrievanceType", b_1."SubSubject"::character varying)::text AS "SubSubject",
+                    b_1."ID",
+                    COALESCE(a_2."ClientKey", b_1."ClientKey") AS "ClientKey",
+                    b_1."Lang",
+                    b_1."Officer",
+                    b_1."Title",
+                    b_1."Description"
+                   FROM masters."Subject" b_1
+                     RIGHT JOIN connecthub."GrievanceType" a_2 ON a_2."ID" = b_1."SubSubjectKey"::integer AND a_2."ClientKey" = b_1."ClientKey" AND a_2."Lang" = b_1."Lang") s_1 ON s_1."SubSubjectKey"::integer = COALESCE(a_1."SubSubjectCode", a_1."GrievanceType") AND s_1."ClientKey" = a_1."ClientKey"
+             LEFT JOIN ( SELECT p_2."ClientKey",
+                    p_2."PriorityKey",
+                    p_2."CreatedBy",
+                    p_2."CreatedOn",
+                    p_2."ModifiedBy",
+                    p_2."ModifiedOn",
+                    p_2."SLA",
+                    pl.text
+                   FROM masters."Priority" p_2
+                     JOIN masters."Priority_Lang" pl ON p_2."ClientKey" = pl."ClientKey" AND p_2."PriorityKey" = pl."PriorityKey") p_1 ON p_1."ClientKey" = a_1."ClientKey" AND p_1.text::text = a_1."Priority"::text
+             LEFT JOIN masters."Status" s_1_1 ON s_1_1."ClientKey" = a_1."ClientKey" AND s_1_1."StatusKey" = a_1."GrievanceStatus"
+             LEFT JOIN ( SELECT a_2."ReferenceID",
+                    a_2."ClientKey",
+                    a_2."Lang",
+                    a_2."ReferenceRelation",
+                    a_2."ReferenceType",
+                    a_2."ID",
+                    a_2."ConstituencyKey",
+                    a_2."StateKey",
+                    a_2."DistrictKey",
+                    a_2."MandalKey",
+                    a_2."VillageKey",
+                    a_2."Mobile",
+                    a_2."AlternateMobile",
+                    a_2."RelationContact",
+                    a_2."RelationAlternateContact",
+                    a_2."Name",
+                    a_2."RequestorFirstName",
+                    a_2."RequestorLastName",
+                    a_2."GrievanceKey",
+                    a_2."RequestorType",
+                    a_2."RequestorTypeName",
+                    a_2."Gender",
+                    a_2."Age",
+                    a_2."Email",
+                    a_2."Occupation",
+                    array_agg(COALESCE(tl."ReportingCategory", a_2."Tag")) AS "Tags",
+                    a_2."VoterID",
+                    a_2."BoothID"
+                   FROM ( SELECT a_3."ReferenceID",
+                            a_3."ClientKey",
+                            a_3."Lang",
+                            a_3."ReferenceRelation",
+                            a_3."ReferenceType",
+                            a_3."ID",
+                            a_3."ConstituencyKey",
+                            a_3."StateKey",
+                            a_3."DistrictKey",
+                            a_3."MandalKey",
+                            a_3."VillageKey",
+                            a_3."Mobile",
+                            a_3."AlternateMobile",
+                            a_3."RelationContact",
+                            a_3."RelationAlternateContact",
+                            a_3."Name",
+                            a_3."RequestorFirstName",
+                            a_3."RequestorLastName",
+                            a_3."GrievanceKey",
+                            a_3."RequestorType",
+                            a_3."RequestorTypeName",
+                            a_3."Gender",
+                            a_3."Age",
+                            a_3."Email",
+                            a_3."Occupation",
+                            a_3."Tags",
+                            unnest(a_3."Tags") AS "Tag",
+                            a_3."VoterID",
+                            a_3."BoothID"
+                           FROM ( SELECT b_1."ReferenceID",
+                                    b_1."ClientKey",
+                                    b_1."Lang",
+                                    b_1."ReferenceRelation",
+                                    b_1."ReferenceType",
+                                    COALESCE(c."AssociationID", a_2_1."RequestorID") AS "ID",
+                                    a_2_1."ConstituencyKey",
+                                    COALESCE(c."StateKey", a_2_1."StateKey") AS "StateKey",
+                                    COALESCE(c."DistrictKey", a_2_1."DistrictKey") AS "DistrictKey",
+                                    COALESCE(c."MandalKey", a_2_1."MandalKey") AS "MandalKey",
+                                    COALESCE(c."VillageKey", a_2_1."VillageKey") AS "VillageKey",
+                                    COALESCE(c."Mobile", a_2_1."Mobile") AS "Mobile",
+                                    COALESCE(c."AlternateMobile", a_2_1."AlternateMobile") AS "AlternateMobile",
+                                    a_2_1."RelationContact",
+                                    a_2_1."RelationAlternateContact",
+                                    c."Name",
+                                    a_2_1."RequestorFirstName",
+                                    a_2_1."RequestorLastName",
+                                    b_1."GrievanceKey",
+                                    COALESCE(a_2_1."RequestorType", 9) AS "RequestorType",
+                                    COALESCE(a_2_1."RequestorTypeName", 'Association'::character varying) AS "RequestorTypeName",
+                                    a_2_1."Gender",
+                                    a_2_1."Age",
+                                    a_2_1."Email",
+                                    a_2_1."Occupation",
+                                    COALESCE(c."Tags", a_2_1."Tags") AS "Tags",
+                                    a_2_1."VoterID",
+                                    a_2_1."BoothID"
+                                   FROM connecthub."RequestRequestorList" b_1
+                                     LEFT JOIN hubviews.requestor_details_v1 a_2_1 ON a_2_1."ClientKey" = b_1."ClientKey" AND a_2_1."Lang" = b_1."Lang" AND a_2_1."RequestorID" = b_1."ReferenceID" AND b_1."ReferenceType"::text = 'Individual'::text
+                                     LEFT JOIN hubviews."vw_unionInfo" c ON c."ClientKey" = b_1."ClientKey" AND c."Lang" = b_1."Lang" AND b_1."ReferenceType"::text = 'Association'::text AND c."AssociationID" = b_1."ReferenceID") a_3) a_2
+                     LEFT JOIN ( SELECT "TagList"."ID",
+                            "TagList"."TagType",
+                            "TagList"."Tags",
+                            "TagList"."IsActive",
+                            "TagList"."ClientKey",
+                            "TagList"."Lang",
+                            "TagList"."ReportingCategory"
+                           FROM masters."TagList"
+                          WHERE ("TagList"."TagType"::text = ANY (ARRAY['AssociationType'::character varying::text, 'RequestorType'::character varying::text])) AND "TagList"."Lang" = 'en'::bpchar) tl ON tl."Tags"::text = a_2."Tag" AND tl."ClientKey" = a_2."ClientKey"
+                  GROUP BY a_2."ReferenceID", a_2."ClientKey", a_2."Lang", a_2."ReferenceRelation", a_2."ReferenceType", a_2."ID", a_2."ConstituencyKey", a_2."StateKey", a_2."DistrictKey", a_2."MandalKey", a_2."VillageKey", a_2."Mobile", a_2."AlternateMobile", a_2."RelationContact", a_2."RelationAlternateContact", a_2."Name", a_2."RequestorFirstName", a_2."RequestorLastName", a_2."GrievanceKey", a_2."RequestorType", a_2."RequestorTypeName", a_2."Gender", a_2."Age", a_2."Email", a_2."Occupation", a_2."VoterID", a_2."BoothID") b ON a_1."ClientKey" = b."ClientKey" AND a_1."Lang" = b."Lang" AND a_1."GrievanceKey"::text = b."GrievanceKey"::text
+             LEFT JOIN connecthub."UserInfo" u ON u."ClientKey" = a_1."ClientKey" AND a_1."AssignedTo" = u."UserKey"::text
+             LEFT JOIN hubviews.vw_party_incharges_publicdata v_1 ON v_1.booth = b."BoothID"
+          WHERE a_1."IsActive" = true AND a_1."GrievanceStatus" <> 7
+        ), grievance_aggregated AS (
+         SELECT grievance_data."ClientKey",
+            grievance_data."Lang",
+            grievance_data."GrievanceKey",
+            grievance_data."GrievanceType",
+            grievance_data."GrievanceTypeName",
+            grievance_data."GrievanceText",
+            grievance_data."Attachments",
+            string_to_array(string_agg(grievance_data."AssociationID", ','::text), ','::text)::integer[] AS "AssociationID",
+                CASE
+                    WHEN grievance_data."ReferenceRelation"::text = 'RequestedFor'::text THEN json_agg(grievance_data.obj)::text
+                    ELSE NULL::text
+                END AS "RequestedFor",
+                CASE
+                    WHEN grievance_data."ReferenceRelation"::text = 'RequestedBy'::text THEN json_agg(grievance_data.obj)::text
+                    ELSE NULL::text
+                END AS "RequestedBy",
+                CASE
+                    WHEN grievance_data."ReferenceRelation"::text = 'ReferedBy'::text THEN json_agg(grievance_data.obj)::text
+                    ELSE NULL::text
+                END AS "ReferedBy",
+            connecthub.array_distinct(string_to_array(string_agg(grievance_data."RequestorACKey", ','::text), ','::text)::integer[]) AS "RequestorACKey",
+            connecthub.array_distinct(string_to_array(string_agg(grievance_data."RequestorStateKey", ','::text), ','::text)::integer[]) AS "RequestorStateKey",
+            connecthub.array_distinct(string_to_array(string_agg(grievance_data."RequestorDistrictKey", ','::text), ','::text)::integer[]) AS "RequestorDistrictKey",
+            connecthub.array_distinct(string_to_array(string_agg(grievance_data."RequestorMandalKey", ','::text), ','::text)::integer[]) AS "RequestorMandalKey",
+            connecthub.array_distinct(string_to_array(string_agg(grievance_data."RequestorVillageKey", ','::text), ','::text)::integer[]) AS "RequestorVillageKey",
+            grievance_data."Tags",
+            grievance_data."AdditionalInfo"::text AS "AdditionalInfo",
+            grievance_data."Priority",
+            grievance_data.sla,
+            grievance_data."DueDate",
+            grievance_data."GrievanceStatus",
+            grievance_data."Status",
+            grievance_data."IsActive",
+            grievance_data."Remarks",
+            grievance_data.age_in_days,
+                CASE
+                    WHEN grievance_data.age_in_days >= 0::numeric AND grievance_data.age_in_days <= 10::numeric THEN '0-10 days'::text
+                    WHEN grievance_data.age_in_days >= 11::numeric AND grievance_data.age_in_days <= 20::numeric THEN '11-20 days'::text
+                    WHEN grievance_data.age_in_days >= 21::numeric AND grievance_data.age_in_days <= 30::numeric THEN '21-30 days'::text
+                    WHEN grievance_data.age_in_days >= 31::numeric AND grievance_data.age_in_days <= 40::numeric THEN '31-40 days'::text
+                    ELSE '> 40 days'::text
+                END AS age_category,
+            grievance_data."CreatedOn",
+            grievance_data."ModifiedOn",
+            grievance_data."CreatedBy",
+            grievance_data."CreatedUserName",
+            grievance_data."ModifiedUserName",
+            grievance_data."Note",
+            grievance_data."IsLocationSpecific",
+            grievance_data."LocationGranularity",
+            grievance_data."LocationKey"::text AS "LocationKey",
+            connecthub.array_distinct(string_to_array(string_agg(grievance_data."RequestorType", ','::text), ','::text)::integer[]) AS "RequestorType",
+            array_textdistinct(string_to_array(string_agg(grievance_data."Gender", ','::text), ','::text)) AS "Gender",
+            array_textdistinct(string_to_array(string_agg(grievance_data."Mobile", ','::text), ','::text)) AS "Mobile",
+            array_textdistinct(string_to_array(string_agg(grievance_data."Email", ','::text), ','::text)) AS "Email",
+            array_textdistinct(string_to_array(string_agg(btrim(grievance_data."RequestorTags", '{""}'::text), ','::text), ','::text)) AS "RequestorTags",
+            array_textdistinct(string_to_array(string_agg(grievance_data."AgeGroup", ','::text), ','::text)) AS "AgeGroup",
+            grievance_data."AssignedTo",
+            grievance_data."AssignedName",
+            grievance_data."Source",
+            grievance_data."Department",
+            grievance_data."DepartmentKey",
+            grievance_data."HOD",
+            grievance_data."HODKey",
+            grievance_data."Subject",
+            grievance_data."SubjectKey",
+            grievance_data."SubSubject",
+            grievance_data."SubSubjectCode",
+            grievance_data."PartyCadreStatus",
+            grievance_data.booth_incharge,
+            grievance_data.booth_incharge_mobile,
+            grievance_data.unit_incharge,
+            grievance_data.unit_incharge_mobile,
+            grievance_data.cluster_incharge,
+            grievance_data.cluster_incharge_mobile
+           FROM grievance_data
+          GROUP BY grievance_data."Source", grievance_data."ClientKey", grievance_data.age_in_days, (
+                CASE
+                    WHEN grievance_data.age_in_days >= 0::numeric AND grievance_data.age_in_days <= 10::numeric THEN '0-10 days'::text
+                    WHEN grievance_data.age_in_days >= 11::numeric AND grievance_data.age_in_days <= 20::numeric THEN '11-20 days'::text
+                    WHEN grievance_data.age_in_days >= 21::numeric AND grievance_data.age_in_days <= 30::numeric THEN '21-30 days'::text
+                    WHEN grievance_data.age_in_days >= 31::numeric AND grievance_data.age_in_days <= 40::numeric THEN '31-40 days'::text
+                    ELSE '> 40 days'::text
+                END), grievance_data."Lang", grievance_data."GrievanceKey", grievance_data."GrievanceType", grievance_data."GrievanceTypeName", grievance_data."GrievanceText", grievance_data."Attachments", grievance_data."ReferenceRelation", grievance_data."Tags", (grievance_data."AdditionalInfo"::text), grievance_data."Priority", grievance_data.sla, grievance_data."DueDate", grievance_data."GrievanceStatus", grievance_data."Status", grievance_data."IsActive", grievance_data."Remarks", grievance_data."CreatedOn", grievance_data."ModifiedOn", grievance_data."CreatedBy", grievance_data."CreatedUserName", grievance_data."ModifiedUserName", grievance_data."Note", grievance_data."IsLocationSpecific", grievance_data."LocationGranularity", (grievance_data."LocationKey"::text), grievance_data."AssignedTo", grievance_data."AssignedName", grievance_data."Department", grievance_data."DepartmentKey", grievance_data."HOD", grievance_data."HODKey", grievance_data."Subject", grievance_data."SubjectKey", grievance_data."SubSubject", grievance_data."SubSubjectCode", grievance_data."PartyCadreStatus", grievance_data.booth_incharge, grievance_data.booth_incharge_mobile, grievance_data.unit_incharge, grievance_data.unit_incharge_mobile, grievance_data.cluster_incharge, grievance_data.cluster_incharge_mobile
+        ), grievance_final AS (
+         SELECT grievance_aggregated."ClientKey",
+            grievance_aggregated."Lang",
+            grievance_aggregated."GrievanceKey",
+            grievance_aggregated."GrievanceType",
+            grievance_aggregated."GrievanceTypeName",
+            grievance_aggregated."GrievanceText",
+            array_length(string_to_array(grievance_aggregated."Attachments", ','::text), 1) AS "Attachments",
+            COALESCE(connecthub.array_distinct(string_to_array(string_agg(btrim(grievance_aggregated."AssociationID"::text, '{}'::text), ','::text), ','::text)::integer[]), '{}'::integer[]) AS "AssociationID",
+            json_build_object('Count', json_array_length(max(grievance_aggregated."RequestedFor")::json), 'List', max(grievance_aggregated."RequestedFor")::json) AS "RequestedFor",
+            json_build_object('Count', json_array_length(max(grievance_aggregated."RequestedBy")::json), 'List', max(grievance_aggregated."RequestedBy")::json) AS "RequestedBy",
+            json_build_object('Count', json_array_length(max(grievance_aggregated."ReferedBy")::json), 'List', max(grievance_aggregated."ReferedBy")::json) AS "ReferedBy",
+            connecthub.array_distinct(string_to_array(string_agg(btrim(grievance_aggregated."RequestorACKey"::text, '{}'::text), ','::text), ','::text)::integer[]) AS "RequestorACKey",
+            connecthub.array_distinct(string_to_array(string_agg(btrim(grievance_aggregated."RequestorStateKey"::text, '{}'::text), ','::text), ','::text)::integer[]) AS "RequestorStateKey",
+            connecthub.array_distinct(string_to_array(string_agg(btrim(grievance_aggregated."RequestorDistrictKey"::text, '{}'::text), ','::text), ','::text)::integer[]) AS "RequestorDistrictKey",
+            connecthub.array_distinct(string_to_array(string_agg(btrim(grievance_aggregated."RequestorMandalKey"::text, '{}'::text), ','::text), ','::text)::integer[]) AS "RequestorMandalKey",
+            connecthub.array_distinct(string_to_array(string_agg(btrim(grievance_aggregated."RequestorVillageKey"::text, '{}'::text), ','::text), ','::text)::integer[]) AS "RequestorVillageKey",
+            connecthub.array_distinct(string_to_array(string_agg(btrim(grievance_aggregated."RequestorType"::text, '{}'::text), ','::text), ','::text)::integer[]) AS "RequestorType",
+            array_textdistinct(string_to_array(string_agg(btrim(grievance_aggregated."Gender"::text, '{}'::text), ','::text), ','::text)) AS "Gender",
+            array_textdistinct(string_to_array(string_agg(btrim(grievance_aggregated."Mobile"::text, '{}'::text), ','::text), ','::text)) AS "Mobile",
+            array_textdistinct(string_to_array(string_agg(btrim(grievance_aggregated."Email"::text, '{}'::text), ','::text), ','::text)) AS "Email",
+            COALESCE(array_textdistinct(string_to_array(string_agg(replace(btrim(grievance_aggregated."RequestorTags"::text, '{"\"}'::text), '"'::text, ''::text), ','::text), ','::text)), '{}'::text[]) AS "RequestorTags",
+            array_textdistinct(string_to_array(string_agg(btrim(grievance_aggregated."AgeGroup"::text, '{}'::text), ','::text), ','::text)) AS "AgeGroup",
+            COALESCE(grievance_aggregated."Tags", '{}'::text[]) AS "Tags",
+            grievance_aggregated."AdditionalInfo"::json AS "AdditionalInfo",
+            COALESCE(grievance_aggregated."Priority", 'NA'::character varying) AS "Priority",
+            grievance_aggregated.sla,
+            COALESCE(grievance_aggregated."DueDate", '9999-12-31'::date) AS "DueDate",
+            grievance_aggregated."GrievanceStatus",
+            grievance_aggregated."Status",
+            grievance_aggregated."IsActive",
+            grievance_aggregated."Remarks",
+            grievance_aggregated."CreatedOn",
+            grievance_aggregated.age_in_days,
+            grievance_aggregated.age_category,
+            grievance_aggregated."ModifiedOn",
+            grievance_aggregated."CreatedBy",
+            grievance_aggregated."CreatedUserName",
+            grievance_aggregated."ModifiedUserName",
+            grievance_aggregated."Note",
+                CASE
+                    WHEN grievance_aggregated."IsLocationSpecific" = false OR grievance_aggregated."IsLocationSpecific" IS NULL THEN 'No'::text
+                    ELSE 'Yes'::text
+                END AS "IsLocationSpecific",
+            COALESCE(grievance_aggregated."LocationGranularity", 'Not Specified'::character varying) AS "LocationGranularity",
+            COALESCE(((grievance_aggregated."LocationKey"::json -> 0) -> 'StateKey'::text) ->> 'ID'::text, '0'::text)::integer AS "StateKey",
+            COALESCE(((grievance_aggregated."LocationKey"::json -> 0) -> 'DistrictKey'::text) ->> 'ID'::text, '0'::text)::integer AS "DistrictKey",
+            COALESCE(((grievance_aggregated."LocationKey"::json -> 0) -> 'PCKey'::text) ->> 'ID'::text, '0'::text)::integer AS "PCKey",
+            COALESCE(((grievance_aggregated."LocationKey"::json -> 0) -> 'ACKey'::text) ->> 'ID'::text, '0'::text)::integer AS "ACKey",
+            COALESCE(((grievance_aggregated."LocationKey"::json -> 0) -> 'MandalKey'::text) ->> 'ID'::text, '0'::text)::integer AS "MandalKey",
+            COALESCE(((grievance_aggregated."LocationKey"::json -> 0) -> 'VillageKey'::text) ->> 'ID'::text, '0'::text)::integer AS "VillageKey",
+            grievance_aggregated."AssignedTo",
+            grievance_aggregated."AssignedName",
+            grievance_aggregated."Source",
+            grievance_aggregated."Department",
+            grievance_aggregated."DepartmentKey",
+            grievance_aggregated."HOD",
+            grievance_aggregated."HODKey",
+            grievance_aggregated."Subject",
+            grievance_aggregated."SubjectKey",
+            grievance_aggregated."SubSubject",
+            grievance_aggregated."SubSubjectCode",
+            grievance_aggregated."PartyCadreStatus",
+            grievance_aggregated.booth_incharge,
+            grievance_aggregated.booth_incharge_mobile,
+            grievance_aggregated.unit_incharge,
+            grievance_aggregated.unit_incharge_mobile,
+            grievance_aggregated.cluster_incharge,
+            grievance_aggregated.cluster_incharge_mobile
+           FROM grievance_aggregated
+          GROUP BY grievance_aggregated."Source", grievance_aggregated."ClientKey", grievance_aggregated.age_in_days, grievance_aggregated.age_category, grievance_aggregated."Lang", grievance_aggregated."GrievanceKey", grievance_aggregated."GrievanceType", grievance_aggregated."GrievanceTypeName", grievance_aggregated."GrievanceText", grievance_aggregated."Attachments", grievance_aggregated."Tags", grievance_aggregated."AdditionalInfo", grievance_aggregated."Priority", grievance_aggregated.sla, grievance_aggregated."DueDate", grievance_aggregated."GrievanceStatus", grievance_aggregated."Status", grievance_aggregated."IsActive", grievance_aggregated."Remarks", grievance_aggregated."CreatedOn", grievance_aggregated."ModifiedOn", grievance_aggregated."CreatedBy", grievance_aggregated."CreatedUserName", grievance_aggregated."ModifiedUserName", grievance_aggregated."Note", grievance_aggregated."IsLocationSpecific", grievance_aggregated."LocationGranularity", grievance_aggregated."LocationKey", grievance_aggregated."AssignedTo", grievance_aggregated."AssignedName", grievance_aggregated."Department", grievance_aggregated."DepartmentKey", grievance_aggregated."HOD", grievance_aggregated."HODKey", grievance_aggregated."Subject", grievance_aggregated."SubjectKey", grievance_aggregated."SubSubject", grievance_aggregated."SubSubjectCode", grievance_aggregated."PartyCadreStatus", grievance_aggregated.booth_incharge, grievance_aggregated.booth_incharge_mobile, grievance_aggregated.unit_incharge, grievance_aggregated.unit_incharge_mobile, grievance_aggregated.cluster_incharge, grievance_aggregated.cluster_incharge_mobile
+        )
+    SELECT 
+        g."ClientKey",
+        g."Lang",
+        g."GrievanceKey" AS grievance_key,
+        g."GrievanceType" AS grievance_type_key,
+        g."GrievanceTypeName" AS grievance_type,
+        g."GrievanceText" AS grievance_text,
+        array_length(string_to_array(g."Attachments"::text, ','), 1) AS no_of_attachments_in_grievance,
+        g."AssociationID" AS association_id,
+        g."RequestedFor" AS requested_for,
+        g."RequestedBy" AS requested_by,
+        g."ReferedBy" AS refered_by,
+        COALESCE(g."RequestorACKey", '{}'::integer[]) AS requestor_ac_key,
+        COALESCE(g."RequestorStateKey", '{}'::integer[]) AS requestor_state_key,
+        COALESCE(g."RequestorDistrictKey", '{}'::integer[]) AS requestor_district_key,
+        COALESCE(g."RequestorMandalKey", '{}'::integer[]) AS requestor_mandal_key,
+        COALESCE(g."RequestorVillageKey", '{}'::integer[]) AS requestor_village_key,
+        g."RequestorType" AS requestor_type,
+        COALESCE(g."Gender", '{None}'::text[]) AS gender,
+        g."Mobile" AS mobile,
+        COALESCE(g."Email", '{}'::text[]) AS email,
+        g."RequestorTags" AS requestor_tags,
+        COALESCE(g."AgeGroup", '{}'::text[]) AS age_group,
+        g."Tags" AS tags,
+        COALESCE(g."AdditionalInfo", '[{}]'::json) AS additional_info,
+        g."Priority" AS priority,
+        g.sla,
+        g."DueDate" AS due_date,
+        g."GrievanceStatus" AS grievance_status_key,
+        g."Status" AS grievance_status,
+        g."IsActive" AS is_active,
+        g."Remarks" AS remarks,
+        g.age_in_days,
+        g.age_category,
+        g."CreatedOn" AS created_on,
+        g."ModifiedOn" AS modified_on,
+        g."CreatedBy" AS created_by_key,
+        g."CreatedUserName" AS created_by,
+        g."ModifiedUserName" AS modified_by,
+        g."Note" AS note,
+        g."LocationGranularity" AS location_granularity,
+        s."StateKey" AS request_state_key,
+        s."State" AS request_state,
+        dis."DistrictKey" AS request_district_key,
+        dis."District" AS request_district,
+        g."PCKey" AS request_pc_key,
+        p."PCName" AS request_pc_name,
+        g."ACKey" AS request_ac_key,
+        a."ACName" AS request_ac_name,
+        g."MandalKey" AS request_mandal_key,
+        m."Mandal" AS request_mandal,
+        g."VillageKey" AS request_village_key,
+        COALESCE(v."Village", 'NA') AS request_village,
+        g."AssignedTo" AS assignee_to_key,
+        g."AssignedName" AS assigned_to,
+        g."Source" AS source,
+        g."Department" AS department,
+        g."DepartmentKey" AS departmentkey,
+        g."HOD" AS hod,
+        g."HODKey" AS hodkey,
+        g."Subject" AS subject,
+        g."SubjectKey" AS subjectkey,
+        g."SubSubject" AS subsubject,
+        g."SubSubjectCode" AS subsubjectkey,
+        g."PartyCadreStatus" AS party_cadre_status,
+        g.booth_incharge,
+        g.booth_incharge_mobile,
+        g.unit_incharge,
+        g.unit_incharge_mobile,
+        g.cluster_incharge,
+        g.cluster_incharge_mobile
+    FROM grievance_final g
+     LEFT JOIN ( SELECT DISTINCT "PCACVillages"."StateKey",
+            "PCACVillages"."State",
+            "PCACVillages"."ClientKey"
+           FROM masters."PCACVillages"
+          WHERE "PCACVillages"."StateKey" = 28) s ON s."StateKey" = 28 AND s."ClientKey" = g."ClientKey"
+     LEFT JOIN ( SELECT DISTINCT "PCACVillages"."StateKey",
+            "PCACVillages"."DistrictKey",
+            "PCACVillages"."District",
+            "PCACVillages"."ClientKey"
+           FROM masters."PCACVillages") dis ON g."DistrictKey" = dis."DistrictKey" AND g."ClientKey" = dis."ClientKey"
+     LEFT JOIN ( SELECT DISTINCT "PCACVillages"."PCKey",
+            "PCACVillages"."PCName",
+            "PCACVillages"."ClientKey"
+           FROM masters."PCACVillages") p ON g."PCKey" = p."PCKey" AND g."ClientKey" = p."ClientKey"
+     LEFT JOIN ( SELECT DISTINCT "PCACVillages"."ACKey",
+            "PCACVillages"."ACName",
+            "PCACVillages"."ClientKey"
+           FROM masters."PCACVillages") a ON g."ACKey" = a."ACKey" AND g."ClientKey" = a."ClientKey"
+     LEFT JOIN ( SELECT DISTINCT "PCACVillages"."ACKey",
+            "PCACVillages"."MandalKey",
+            "PCACVillages"."Mandal",
+            "PCACVillages"."ClientKey"
+           FROM masters."PCACVillages") m ON g."ACKey" = m."ACKey" AND g."MandalKey" = m."MandalKey" AND g."ClientKey" = m."ClientKey"
+     LEFT JOIN ( SELECT "PCACVillages"."ACKey",
+            "PCACVillages"."MandalKey",
+            "PCACVillages"."VillageKey",
+            "PCACVillages"."Village",
+            "PCACVillages"."ClientKey"
+           FROM masters."PCACVillages") v ON g."ACKey" = v."ACKey" AND g."MandalKey" = v."MandalKey" AND g."VillageKey" = v."VillageKey" AND g."ClientKey" = v."ClientKey";
+END;
+$function$
+;
+
+CREATE OR REPLACE VIEW hubviews.vw_grievancedataset
+AS WITH grievance_data AS (
+         SELECT a_1."ClientKey",
+            a_1."Lang",
+            a_1."GrievanceKey",
+            a_1."GrievanceType",
+            a_1."GrievanceTypeName",
+            a_1."GrievanceText",
+            a_1."Attachments",
+            b."ReferenceRelation",
+                CASE
+                    WHEN b."ReferenceType"::text = 'Association'::text THEN b."ReferenceID"::text
+                    ELSE NULL::text
+                END AS "AssociationID",
+            json_build_object('Sno', row_number() OVER (PARTITION BY a_1."GrievanceKey", b."ReferenceRelation"), 'ID', b."ReferenceID", 'Label',
+                CASE
+                    WHEN b."ReferenceType"::text = 'Association'::text THEN ((b."Name"::text || ' ('::text) || b."ReferenceType"::text) || ')'::text
+                    WHEN b."ReferenceType"::text = 'Individual'::text THEN ((((COALESCE(b."RequestorFirstName"::text, ''::text) || ' '::text) || COALESCE(b."RequestorLastName"::text, ''::text)) || ' ('::text) || b."ReferenceType"::text) || ')'::text
+                    ELSE NULL::text
+                END, 'ReferenceType', b."ReferenceType") AS obj,
+            b."ConstituencyKey"::text AS "RequestorACKey",
+            b."StateKey"::text AS "RequestorStateKey",
+            b."DistrictKey"::text AS "RequestorDistrictKey",
+            b."MandalKey"::text AS "RequestorMandalKey",
+            b."VillageKey"::text AS "RequestorVillageKey",
+            a_1."Tags",
+            a_1."AdditionalInfo",
+            a_1."Priority",
+                CASE
+                    WHEN a_1."DueDate" > CURRENT_DATE THEN 'Beyond SLA'::text
+                    ELSE 'Within SLA'::text
+                END AS sla,
+            a_1."DueDate",
+            a_1."GrievanceStatus",
+            s_1_1."Status",
+            a_1."IsActive",
+            a_1."Remarks",
+            EXTRACT(day FROM CURRENT_DATE::timestamp without time zone - a_1."CreatedOn") AS age_in_days,
+            a_1."CreatedOn",
+            a_1."ModifiedOn",
+            a_1."CreatedBy",
+            a_1."CreatedUserName",
+            a_1."ModifiedUserName",
+            a_1."Note",
+            a_1."IsLocationSpecific",
+            a_1."LocationGranularity",
+            a_1."LocationKey",
+            b."RequestorType"::text AS "RequestorType",
+                CASE
+                    WHEN b."Age"::text::integer < 18 THEN 'Minor'::text
+                    WHEN b."Age"::text::integer >= 18 AND b."Age"::text::integer <= 25 THEN 'AgeGroup(18-25)'::text
+                    WHEN b."Age"::text::integer >= 26 AND b."Age"::text::integer <= 30 THEN 'AgeGroup(26-30)'::text
+                    WHEN b."Age"::text::integer >= 31 AND b."Age"::text::integer <= 35 THEN 'AgeGroup(31-35)'::text
+                    WHEN b."Age"::text::integer >= 36 AND b."Age"::text::integer <= 40 THEN 'AgeGroup(36-40)'::text
+                    WHEN b."Age"::text::integer >= 41 AND b."Age"::text::integer <= 45 THEN 'AgeGroup(41-45)'::text
+                    WHEN b."Age"::text::integer >= 46 AND b."Age"::text::integer <= 50 THEN 'AgeGroup(46-50)'::text
+                    WHEN b."Age"::text::integer >= 51 AND b."Age"::text::integer <= 55 THEN 'AgeGroup(51-55)'::text
+                    WHEN b."Age"::text::integer >= 56 AND b."Age"::text::integer <= 60 THEN 'AgeGroup(56-60)'::text
+                    WHEN b."Age"::text::integer >= 61 AND b."Age"::text::integer <= 65 THEN 'AgeGroup(61-65)'::text
+                    WHEN b."Age"::text::integer >= 66 AND b."Age"::text::integer <= 70 THEN 'AgeGroup(66-70)'::text
+                    WHEN b."Age"::text::integer >= 71 AND b."Age"::text::integer <= 75 THEN 'AgeGroup(71-75)'::text
+                    WHEN b."Age"::text::integer > 75 THEN 'AgeGroup(>75)'::text
+                    ELSE NULL::text
+                END AS "AgeGroup",
+            b."Gender"::text AS "Gender",
+            ((COALESCE(b."Mobile"::text, ''::text) || COALESCE(','::text || b."AlternateMobile"::text, ''::text)) || COALESCE(','::text || b."RelationContact"::text, ''::text)) || COALESCE(','::text || b."RelationAlternateContact"::text, ''::text) AS "Mobile",
+            b."Email"::text AS "Email",
+            b."Occupation"::text AS "Occupation",
+            b."Tags"::text AS "RequestorTags",
+            a_1."AssignedTo",
+            u."UserName" AS "AssignedName",
+            a_1."Source",
+            s_1."Department" AS "HOD",
+            s_1."DepartmentKey" AS "HODKey",
+            a_1."Department",
+            a_1."DepartmentCode"::text AS "DepartmentKey",
+            s_1."Subject",
+            s_1."SubjectKey",
+            s_1."SubSubject",
+            a_1."SubSubjectCode",
+            a_1."PartyCadreStatus",
+            v_1.booth_incharge,
+            v_1.booth_incharge_mobile,
+            v_1.unit_incharge,
+            v_1.unit_incharge_mobile,
+            v_1.cluster_incharge,
+            v_1.cluster_incharge_mobile
+           FROM connecthub."GrievanceInfo" a_1
+             LEFT JOIN ( SELECT COALESCE(a_2."HODKey"::text, b_1."HODKey") AS "HODKey",
+                    COALESCE(a_2."HOD", b_1."HOD") AS "HOD",
+                    COALESCE(a_2."DepartmentKey"::text, b_1."DepartmentKey") AS "DepartmentKey",
+                    COALESCE(a_2."Department", b_1."Department") AS "Department",
+                    b_1."SubjectKey",
+                    b_1."Subject",
+                    COALESCE(a_2."ID"::text, b_1."SubSubjectKey") AS "SubSubjectKey",
+                    COALESCE(a_2."GrievanceType", b_1."SubSubject"::character varying)::text AS "SubSubject",
+                    b_1."ID",
+                    COALESCE(a_2."ClientKey", b_1."ClientKey") AS "ClientKey",
+                    b_1."Lang",
+                    b_1."Officer",
+                    b_1."Title",
+                    b_1."Description"
+                   FROM masters."Subject" b_1
+                     RIGHT JOIN connecthub."GrievanceType" a_2 ON a_2."ID" = b_1."SubSubjectKey"::integer AND a_2."ClientKey" = b_1."ClientKey" AND a_2."Lang" = b_1."Lang") s_1 ON s_1."SubSubjectKey"::integer = COALESCE(a_1."SubSubjectCode", a_1."GrievanceType") AND s_1."ClientKey" = a_1."ClientKey"
+             LEFT JOIN ( SELECT p_2."ClientKey",
+                    p_2."PriorityKey",
+                    p_2."CreatedBy",
+                    p_2."CreatedOn",
+                    p_2."ModifiedBy",
+                    p_2."ModifiedOn",
+                    p_2."SLA",
+                    pl.text
+                   FROM masters."Priority" p_2
+                     JOIN masters."Priority_Lang" pl ON p_2."ClientKey" = pl."ClientKey" AND p_2."PriorityKey" = pl."PriorityKey") p_1 ON p_1."ClientKey" = a_1."ClientKey" AND p_1.text::text = a_1."Priority"::text
+             LEFT JOIN masters."Status" s_1_1 ON s_1_1."ClientKey" = a_1."ClientKey" AND s_1_1."StatusKey" = a_1."GrievanceStatus"
+             LEFT JOIN ( SELECT a_2."ReferenceID",
+                    a_2."ClientKey",
+                    a_2."Lang",
+                    a_2."ReferenceRelation",
+                    a_2."ReferenceType",
+                    a_2."ID",
+                    a_2."ConstituencyKey",
+                    a_2."StateKey",
+                    a_2."DistrictKey",
+                    a_2."MandalKey",
+                    a_2."VillageKey",
+                    a_2."Mobile",
+                    a_2."AlternateMobile",
+                    a_2."RelationContact",
+                    a_2."RelationAlternateContact",
+                    a_2."Name",
+                    a_2."RequestorFirstName",
+                    a_2."RequestorLastName",
+                    a_2."GrievanceKey",
+                    a_2."RequestorType",
+                    a_2."RequestorTypeName",
+                    a_2."Gender",
+                    a_2."Age",
+                    a_2."Email",
+                    a_2."Occupation",
+                    array_agg(COALESCE(tl."ReportingCategory", a_2."Tag")) AS "Tags",
+                    a_2."VoterID",
+                    a_2."BoothID"
+                   FROM ( SELECT a_3."ReferenceID",
+                            a_3."ClientKey",
+                            a_3."Lang",
+                            a_3."ReferenceRelation",
+                            a_3."ReferenceType",
+                            a_3."ID",
+                            a_3."ConstituencyKey",
+                            a_3."StateKey",
+                            a_3."DistrictKey",
+                            a_3."MandalKey",
+                            a_3."VillageKey",
+                            a_3."Mobile",
+                            a_3."AlternateMobile",
+                            a_3."RelationContact",
+                            a_3."RelationAlternateContact",
+                            a_3."Name",
+                            a_3."RequestorFirstName",
+                            a_3."RequestorLastName",
+                            a_3."GrievanceKey",
+                            a_3."RequestorType",
+                            a_3."RequestorTypeName",
+                            a_3."Gender",
+                            a_3."Age",
+                            a_3."Email",
+                            a_3."Occupation",
+                            a_3."Tags",
+                            unnest(a_3."Tags") AS "Tag",
+                            a_3."VoterID",
+                            a_3."BoothID"
+                           FROM ( SELECT b_1."ReferenceID",
+                                    b_1."ClientKey",
+                                    b_1."Lang",
+                                    b_1."ReferenceRelation",
+                                    b_1."ReferenceType",
+                                    COALESCE(c."AssociationID", a_2_1."RequestorID") AS "ID",
+                                    a_2_1."ConstituencyKey",
+                                    COALESCE(c."StateKey", a_2_1."StateKey") AS "StateKey",
+                                    COALESCE(c."DistrictKey", a_2_1."DistrictKey") AS "DistrictKey",
+                                    COALESCE(c."MandalKey", a_2_1."MandalKey") AS "MandalKey",
+                                    COALESCE(c."VillageKey", a_2_1."VillageKey") AS "VillageKey",
+                                    COALESCE(c."Mobile", a_2_1."Mobile") AS "Mobile",
+                                    COALESCE(c."AlternateMobile", a_2_1."AlternateMobile") AS "AlternateMobile",
+                                    a_2_1."RelationContact",
+                                    a_2_1."RelationAlternateContact",
+                                    c."Name",
+                                    a_2_1."RequestorFirstName",
+                                    a_2_1."RequestorLastName",
+                                    b_1."GrievanceKey",
+                                    COALESCE(a_2_1."RequestorType", 9) AS "RequestorType",
+                                    COALESCE(a_2_1."RequestorTypeName", 'Association'::character varying) AS "RequestorTypeName",
+                                    a_2_1."Gender",
+                                    a_2_1."Age",
+                                    a_2_1."Email",
+                                    a_2_1."Occupation",
+                                    COALESCE(c."Tags", a_2_1."Tags") AS "Tags",
+                                    a_2_1."VoterID",
+                                    a_2_1."BoothID"
+                                   FROM connecthub."RequestRequestorList" b_1
+                                     LEFT JOIN hubviews.requestor_details_v1 a_2_1 ON a_2_1."ClientKey" = b_1."ClientKey" AND a_2_1."Lang" = b_1."Lang" AND a_2_1."RequestorID" = b_1."ReferenceID" AND b_1."ReferenceType"::text = 'Individual'::text
+                                     LEFT JOIN hubviews."vw_unionInfo" c ON c."ClientKey" = b_1."ClientKey" AND c."Lang" = b_1."Lang" AND b_1."ReferenceType"::text = 'Association'::text AND c."AssociationID" = b_1."ReferenceID") a_3) a_2
+                     LEFT JOIN ( SELECT "TagList"."ID",
+                            "TagList"."TagType",
+                            "TagList"."Tags",
+                            "TagList"."IsActive",
+                            "TagList"."ClientKey",
+                            "TagList"."Lang",
+                            "TagList"."ReportingCategory"
+                           FROM masters."TagList"
+                          WHERE ("TagList"."TagType"::text = ANY (ARRAY['AssociationType'::character varying::text, 'RequestorType'::character varying::text])) AND "TagList"."Lang" = 'en'::bpchar) tl ON tl."Tags"::text = a_2."Tag" AND tl."ClientKey" = a_2."ClientKey"
+                  GROUP BY a_2."ReferenceID", a_2."ClientKey", a_2."Lang", a_2."ReferenceRelation", a_2."ReferenceType", a_2."ID", a_2."ConstituencyKey", a_2."StateKey", a_2."DistrictKey", a_2."MandalKey", a_2."VillageKey", a_2."Mobile", a_2."AlternateMobile", a_2."RelationContact", a_2."RelationAlternateContact", a_2."Name", a_2."RequestorFirstName", a_2."RequestorLastName", a_2."GrievanceKey", a_2."RequestorType", a_2."RequestorTypeName", a_2."Gender", a_2."Age", a_2."Email", a_2."Occupation", a_2."VoterID", a_2."BoothID") b ON a_1."ClientKey" = b."ClientKey" AND a_1."Lang" = b."Lang" AND a_1."GrievanceKey"::text = b."GrievanceKey"::text
+             LEFT JOIN connecthub."UserInfo" u ON u."ClientKey" = a_1."ClientKey" AND a_1."AssignedTo" = u."UserKey"::text
+             LEFT JOIN hubviews.vw_party_incharges_publicdata v_1 ON v_1.booth = b."BoothID"
+          WHERE a_1."IsActive" = true AND a_1."GrievanceStatus" <> 7
+        ), grievance_aggregated AS (
+         SELECT grievance_data."ClientKey",
+            grievance_data."Lang",
+            grievance_data."GrievanceKey",
+            grievance_data."GrievanceType",
+            grievance_data."GrievanceTypeName",
+            grievance_data."GrievanceText",
+            grievance_data."Attachments",
+            string_to_array(string_agg(grievance_data."AssociationID", ','::text), ','::text)::integer[] AS "AssociationID",
+                CASE
+                    WHEN grievance_data."ReferenceRelation"::text = 'RequestedFor'::text THEN json_agg(grievance_data.obj)::text
+                    ELSE NULL::text
+                END AS "RequestedFor",
+                CASE
+                    WHEN grievance_data."ReferenceRelation"::text = 'RequestedBy'::text THEN json_agg(grievance_data.obj)::text
+                    ELSE NULL::text
+                END AS "RequestedBy",
+                CASE
+                    WHEN grievance_data."ReferenceRelation"::text = 'ReferedBy'::text THEN json_agg(grievance_data.obj)::text
+                    ELSE NULL::text
+                END AS "ReferedBy",
+            connecthub.array_distinct(string_to_array(string_agg(grievance_data."RequestorACKey", ','::text), ','::text)::integer[]) AS "RequestorACKey",
+            connecthub.array_distinct(string_to_array(string_agg(grievance_data."RequestorStateKey", ','::text), ','::text)::integer[]) AS "RequestorStateKey",
+            connecthub.array_distinct(string_to_array(string_agg(grievance_data."RequestorDistrictKey", ','::text), ','::text)::integer[]) AS "RequestorDistrictKey",
+            connecthub.array_distinct(string_to_array(string_agg(grievance_data."RequestorMandalKey", ','::text), ','::text)::integer[]) AS "RequestorMandalKey",
+            connecthub.array_distinct(string_to_array(string_agg(grievance_data."RequestorVillageKey", ','::text), ','::text)::integer[]) AS "RequestorVillageKey",
+            grievance_data."Tags",
+            grievance_data."AdditionalInfo"::text AS "AdditionalInfo",
+            grievance_data."Priority",
+            grievance_data.sla,
+            grievance_data."DueDate",
+            grievance_data."GrievanceStatus",
+            grievance_data."Status",
+            grievance_data."IsActive",
+            grievance_data."Remarks",
+            grievance_data.age_in_days,
+                CASE
+                    WHEN grievance_data.age_in_days >= 0::numeric AND grievance_data.age_in_days <= 10::numeric THEN '0-10 days'::text
+                    WHEN grievance_data.age_in_days >= 11::numeric AND grievance_data.age_in_days <= 20::numeric THEN '11-20 days'::text
+                    WHEN grievance_data.age_in_days >= 21::numeric AND grievance_data.age_in_days <= 30::numeric THEN '21-30 days'::text
+                    WHEN grievance_data.age_in_days >= 31::numeric AND grievance_data.age_in_days <= 40::numeric THEN '31-40 days'::text
+                    ELSE '> 40 days'::text
+                END AS age_category,
+            grievance_data."CreatedOn",
+            grievance_data."ModifiedOn",
+            grievance_data."CreatedBy",
+            grievance_data."CreatedUserName",
+            grievance_data."ModifiedUserName",
+            grievance_data."Note",
+            grievance_data."IsLocationSpecific",
+            grievance_data."LocationGranularity",
+            grievance_data."LocationKey"::text AS "LocationKey",
+            connecthub.array_distinct(string_to_array(string_agg(grievance_data."RequestorType", ','::text), ','::text)::integer[]) AS "RequestorType",
+            array_textdistinct(string_to_array(string_agg(grievance_data."Gender", ','::text), ','::text)) AS "Gender",
+            array_textdistinct(string_to_array(string_agg(grievance_data."Mobile", ','::text), ','::text)) AS "Mobile",
+            array_textdistinct(string_to_array(string_agg(grievance_data."Email", ','::text), ','::text)) AS "Email",
+            array_textdistinct(string_to_array(string_agg(btrim(grievance_data."RequestorTags", '{""}'::text), ','::text), ','::text)) AS "RequestorTags",
+            array_textdistinct(string_to_array(string_agg(grievance_data."AgeGroup", ','::text), ','::text)) AS "AgeGroup",
+            grievance_data."AssignedTo",
+            grievance_data."AssignedName",
+            grievance_data."Source",
+            grievance_data."Department",
+            grievance_data."DepartmentKey",
+            grievance_data."HOD",
+            grievance_data."HODKey",
+            grievance_data."Subject",
+            grievance_data."SubjectKey",
+            grievance_data."SubSubject",
+            grievance_data."SubSubjectCode",
+            grievance_data."PartyCadreStatus",
+            grievance_data.booth_incharge,
+            grievance_data.booth_incharge_mobile,
+            grievance_data.unit_incharge,
+            grievance_data.unit_incharge_mobile,
+            grievance_data.cluster_incharge,
+            grievance_data.cluster_incharge_mobile
+           FROM grievance_data
+          GROUP BY grievance_data."Source", grievance_data."ClientKey", grievance_data.age_in_days, (
+                CASE
+                    WHEN grievance_data.age_in_days >= 0::numeric AND grievance_data.age_in_days <= 10::numeric THEN '0-10 days'::text
+                    WHEN grievance_data.age_in_days >= 11::numeric AND grievance_data.age_in_days <= 20::numeric THEN '11-20 days'::text
+                    WHEN grievance_data.age_in_days >= 21::numeric AND grievance_data.age_in_days <= 30::numeric THEN '21-30 days'::text
+                    WHEN grievance_data.age_in_days >= 31::numeric AND grievance_data.age_in_days <= 40::numeric THEN '31-40 days'::text
+                    ELSE '> 40 days'::text
+                END), grievance_data."Lang", grievance_data."GrievanceKey", grievance_data."GrievanceType", grievance_data."GrievanceTypeName", grievance_data."GrievanceText", grievance_data."Attachments", grievance_data."ReferenceRelation", grievance_data."Tags", (grievance_data."AdditionalInfo"::text), grievance_data."Priority", grievance_data.sla, grievance_data."DueDate", grievance_data."GrievanceStatus", grievance_data."Status", grievance_data."IsActive", grievance_data."Remarks", grievance_data."CreatedOn", grievance_data."ModifiedOn", grievance_data."CreatedBy", grievance_data."CreatedUserName", grievance_data."ModifiedUserName", grievance_data."Note", grievance_data."IsLocationSpecific", grievance_data."LocationGranularity", (grievance_data."LocationKey"::text), grievance_data."AssignedTo", grievance_data."AssignedName", grievance_data."Department", grievance_data."DepartmentKey", grievance_data."HOD", grievance_data."HODKey", grievance_data."Subject", grievance_data."SubjectKey", grievance_data."SubSubject", grievance_data."SubSubjectCode", grievance_data."PartyCadreStatus", grievance_data.booth_incharge, grievance_data.booth_incharge_mobile, grievance_data.unit_incharge, grievance_data.unit_incharge_mobile, grievance_data.cluster_incharge, grievance_data.cluster_incharge_mobile
+        ), grievance_final AS (
+         SELECT grievance_aggregated."ClientKey",
+            grievance_aggregated."Lang",
+            grievance_aggregated."GrievanceKey",
+            grievance_aggregated."GrievanceType",
+            grievance_aggregated."GrievanceTypeName",
+            grievance_aggregated."GrievanceText",
+            array_length(string_to_array(grievance_aggregated."Attachments", ','::text), 1) AS "Attachments",
+            COALESCE(connecthub.array_distinct(string_to_array(string_agg(btrim(grievance_aggregated."AssociationID"::text, '{}'::text), ','::text), ','::text)::integer[]), '{}'::integer[]) AS "AssociationID",
+            json_build_object('Count', json_array_length(max(grievance_aggregated."RequestedFor")::json), 'List', max(grievance_aggregated."RequestedFor")::json) AS "RequestedFor",
+            json_build_object('Count', json_array_length(max(grievance_aggregated."RequestedBy")::json), 'List', max(grievance_aggregated."RequestedBy")::json) AS "RequestedBy",
+            json_build_object('Count', json_array_length(max(grievance_aggregated."ReferedBy")::json), 'List', max(grievance_aggregated."ReferedBy")::json) AS "ReferedBy",
+            connecthub.array_distinct(string_to_array(string_agg(btrim(grievance_aggregated."RequestorACKey"::text, '{}'::text), ','::text), ','::text)::integer[]) AS "RequestorACKey",
+            connecthub.array_distinct(string_to_array(string_agg(btrim(grievance_aggregated."RequestorStateKey"::text, '{}'::text), ','::text), ','::text)::integer[]) AS "RequestorStateKey",
+            connecthub.array_distinct(string_to_array(string_agg(btrim(grievance_aggregated."RequestorDistrictKey"::text, '{}'::text), ','::text), ','::text)::integer[]) AS "RequestorDistrictKey",
+            connecthub.array_distinct(string_to_array(string_agg(btrim(grievance_aggregated."RequestorMandalKey"::text, '{}'::text), ','::text), ','::text)::integer[]) AS "RequestorMandalKey",
+            connecthub.array_distinct(string_to_array(string_agg(btrim(grievance_aggregated."RequestorVillageKey"::text, '{}'::text), ','::text), ','::text)::integer[]) AS "RequestorVillageKey",
+            connecthub.array_distinct(string_to_array(string_agg(btrim(grievance_aggregated."RequestorType"::text, '{}'::text), ','::text), ','::text)::integer[]) AS "RequestorType",
+            array_textdistinct(string_to_array(string_agg(btrim(grievance_aggregated."Gender"::text, '{}'::text), ','::text), ','::text)) AS "Gender",
+            array_textdistinct(string_to_array(string_agg(btrim(grievance_aggregated."Mobile"::text, '{}'::text), ','::text), ','::text)) AS "Mobile",
+            array_textdistinct(string_to_array(string_agg(btrim(grievance_aggregated."Email"::text, '{}'::text), ','::text), ','::text)) AS "Email",
+            COALESCE(array_textdistinct(string_to_array(string_agg(replace(btrim(grievance_aggregated."RequestorTags"::text, '{"\"}'::text), '"'::text, ''::text), ','::text), ','::text)), '{}'::text[]) AS "RequestorTags",
+            array_textdistinct(string_to_array(string_agg(btrim(grievance_aggregated."AgeGroup"::text, '{}'::text), ','::text), ','::text)) AS "AgeGroup",
+            COALESCE(grievance_aggregated."Tags", '{}'::text[]) AS "Tags",
+            grievance_aggregated."AdditionalInfo"::json AS "AdditionalInfo",
+            COALESCE(grievance_aggregated."Priority", 'NA'::character varying) AS "Priority",
+            grievance_aggregated.sla,
+            COALESCE(grievance_aggregated."DueDate", '9999-12-31'::date) AS "DueDate",
+            grievance_aggregated."GrievanceStatus",
+            grievance_aggregated."Status",
+            grievance_aggregated."IsActive",
+            grievance_aggregated."Remarks",
+            grievance_aggregated."CreatedOn",
+            grievance_aggregated.age_in_days,
+            grievance_aggregated.age_category,
+            grievance_aggregated."ModifiedOn",
+            grievance_aggregated."CreatedBy",
+            grievance_aggregated."CreatedUserName",
+            grievance_aggregated."ModifiedUserName",
+            grievance_aggregated."Note",
+                CASE
+                    WHEN grievance_aggregated."IsLocationSpecific" = false OR grievance_aggregated."IsLocationSpecific" IS NULL THEN 'No'::text
+                    ELSE 'Yes'::text
+                END AS "IsLocationSpecific",
+            COALESCE(grievance_aggregated."LocationGranularity", 'Not Specified'::character varying) AS "LocationGranularity",
+            COALESCE(((grievance_aggregated."LocationKey"::json -> 0) -> 'StateKey'::text) ->> 'ID'::text, '0'::text)::integer AS "StateKey",
+            COALESCE(((grievance_aggregated."LocationKey"::json -> 0) -> 'DistrictKey'::text) ->> 'ID'::text, '0'::text)::integer AS "DistrictKey",
+            COALESCE(((grievance_aggregated."LocationKey"::json -> 0) -> 'PCKey'::text) ->> 'ID'::text, '0'::text)::integer AS "PCKey",
+            COALESCE(((grievance_aggregated."LocationKey"::json -> 0) -> 'ACKey'::text) ->> 'ID'::text, '0'::text)::integer AS "ACKey",
+            COALESCE(((grievance_aggregated."LocationKey"::json -> 0) -> 'MandalKey'::text) ->> 'ID'::text, '0'::text)::integer AS "MandalKey",
+            COALESCE(((grievance_aggregated."LocationKey"::json -> 0) -> 'VillageKey'::text) ->> 'ID'::text, '0'::text)::integer AS "VillageKey",
+            grievance_aggregated."AssignedTo",
+            grievance_aggregated."AssignedName",
+            grievance_aggregated."Source",
+            grievance_aggregated."Department",
+            grievance_aggregated."DepartmentKey",
+            grievance_aggregated."HOD",
+            grievance_aggregated."HODKey",
+            grievance_aggregated."Subject",
+            grievance_aggregated."SubjectKey",
+            grievance_aggregated."SubSubject",
+            grievance_aggregated."SubSubjectCode",
+            grievance_aggregated."PartyCadreStatus",
+            grievance_aggregated.booth_incharge,
+            grievance_aggregated.booth_incharge_mobile,
+            grievance_aggregated.unit_incharge,
+            grievance_aggregated.unit_incharge_mobile,
+            grievance_aggregated.cluster_incharge,
+            grievance_aggregated.cluster_incharge_mobile
+           FROM grievance_aggregated
+          GROUP BY grievance_aggregated."Source", grievance_aggregated."ClientKey", grievance_aggregated.age_in_days, grievance_aggregated.age_category, grievance_aggregated."Lang", grievance_aggregated."GrievanceKey", grievance_aggregated."GrievanceType", grievance_aggregated."GrievanceTypeName", grievance_aggregated."GrievanceText", grievance_aggregated."Attachments", grievance_aggregated."Tags", grievance_aggregated."AdditionalInfo", grievance_aggregated."Priority", grievance_aggregated.sla, grievance_aggregated."DueDate", grievance_aggregated."GrievanceStatus", grievance_aggregated."Status", grievance_aggregated."IsActive", grievance_aggregated."Remarks", grievance_aggregated."CreatedOn", grievance_aggregated."ModifiedOn", grievance_aggregated."CreatedBy", grievance_aggregated."CreatedUserName", grievance_aggregated."ModifiedUserName", grievance_aggregated."Note", grievance_aggregated."IsLocationSpecific", grievance_aggregated."LocationGranularity", grievance_aggregated."LocationKey", grievance_aggregated."AssignedTo", grievance_aggregated."AssignedName", grievance_aggregated."Department", grievance_aggregated."DepartmentKey", grievance_aggregated."HOD", grievance_aggregated."HODKey", grievance_aggregated."Subject", grievance_aggregated."SubjectKey", grievance_aggregated."SubSubject", grievance_aggregated."SubSubjectCode", grievance_aggregated."PartyCadreStatus", grievance_aggregated.booth_incharge, grievance_aggregated.booth_incharge_mobile, grievance_aggregated.unit_incharge, grievance_aggregated.unit_incharge_mobile, grievance_aggregated.cluster_incharge, grievance_aggregated.cluster_incharge_mobile
+        )
+ SELECT g."ClientKey",
+    g."Lang",
+    g."GrievanceKey" AS grievance_key,
+    g."GrievanceType" AS grievance_type_key,
+    g."GrievanceTypeName" AS grievance_type,
+    g."GrievanceText" AS grievance_text,
+    COALESCE(g."Attachments", 0) AS no_of_attachments_in_grievance,
+    g."AssociationID" AS association_id,
+    g."RequestedFor" AS requested_for,
+    g."RequestedBy" AS requested_by,
+    g."ReferedBy" AS refered_by,
+    COALESCE(g."RequestorACKey", '{}'::integer[]) AS requestor_ac_key,
+    COALESCE(g."RequestorStateKey", '{}'::integer[]) AS requestor_state_key,
+    COALESCE(g."RequestorDistrictKey", '{}'::integer[]) AS requestor_district_key,
+    COALESCE(g."RequestorMandalKey", '{}'::integer[]) AS requestor_mandal_key,
+    COALESCE(g."RequestorVillageKey", '{}'::integer[]) AS requestor_village_key,
+    g."RequestorType" AS requestor_type,
+    COALESCE(g."Gender", '{None}'::text[]) AS gender,
+    g."Mobile" AS mobile,
+    COALESCE(g."Email", '{}'::text[]) AS email,
+    g."RequestorTags" AS requestor_tags,
+    COALESCE(g."AgeGroup", '{}'::text[]) AS age_group,
+    g."Tags" AS tags,
+    COALESCE(g."AdditionalInfo", '[{}]'::json) AS additional_info,
+    g."Priority" AS priority,
+    g.sla,
+    g."DueDate" AS due_date,
+    g."GrievanceStatus" AS grievance_status_key,
+    g."Status" AS grievance_status,
+    g."IsActive" AS is_active,
+    g."Remarks" AS remarks,
+    g.age_in_days,
+    g.age_category,
+    g."CreatedOn" AS created_on,
+    g."ModifiedOn" AS modified_on,
+    g."CreatedBy" AS created_by_key,
+    g."CreatedUserName" AS created_by,
+    g."ModifiedUserName" AS modified_by,
+    g."Note" AS note,
+    g."LocationGranularity" AS location_granularity,
+    s."StateKey" AS request_state_key,
+    s."State" AS request_state,
+    dis."DistrictKey" AS request_district_key,
+    dis."District" AS request_district,
+    g."PCKey" AS request_pc_key,
+    p."PCName" AS request_pc_name,
+    g."ACKey" AS request_ac_key,
+    a."ACName" AS request_ac_name,
+    g."MandalKey" AS request_mandal_key,
+    m."Mandal" AS request_mandal,
+    g."VillageKey" AS request_village_key,
+    COALESCE(v."Village", 'NA'::text) AS request_village,
+    g."AssignedTo" AS assignee_to_key,
+    g."AssignedName" AS assigned_to,
+    g."Source" AS source,
+    g."Department" AS department,
+    g."DepartmentKey" AS departmentkey,
+    g."HOD" AS hod,
+    g."HODKey" AS hodkey,
+    g."Subject" AS subject,
+    g."SubjectKey" AS subjectkey,
+    g."SubSubject" AS subsubject,
+    g."SubSubjectCode" AS subsubjectkey,
+    g."PartyCadreStatus" AS party_cadre_status,
+    g.booth_incharge,
+    g.booth_incharge_mobile,
+    g.unit_incharge,
+    g.unit_incharge_mobile,
+    g.cluster_incharge,
+    g.cluster_incharge_mobile
+   FROM grievance_final g
+     LEFT JOIN ( SELECT DISTINCT "PCACVillages"."StateKey",
+            "PCACVillages"."State",
+            "PCACVillages"."ClientKey"
+           FROM masters."PCACVillages"
+          WHERE "PCACVillages"."StateKey" = 28) s ON s."StateKey" = 28 AND s."ClientKey" = g."ClientKey"
+     LEFT JOIN ( SELECT DISTINCT "PCACVillages"."StateKey",
+            "PCACVillages"."DistrictKey",
+            "PCACVillages"."District",
+            "PCACVillages"."ClientKey"
+           FROM masters."PCACVillages") dis ON g."DistrictKey" = dis."DistrictKey" AND g."ClientKey" = dis."ClientKey"
+     LEFT JOIN ( SELECT DISTINCT "PCACVillages"."PCKey",
+            "PCACVillages"."PCName",
+            "PCACVillages"."ClientKey"
+           FROM masters."PCACVillages") p ON g."PCKey" = p."PCKey" AND g."ClientKey" = p."ClientKey"
+     LEFT JOIN ( SELECT DISTINCT "PCACVillages"."ACKey",
+            "PCACVillages"."ACName",
+            "PCACVillages"."ClientKey"
+           FROM masters."PCACVillages") a ON g."ACKey" = a."ACKey" AND g."ClientKey" = a."ClientKey"
+     LEFT JOIN ( SELECT DISTINCT "PCACVillages"."ACKey",
+            "PCACVillages"."MandalKey",
+            "PCACVillages"."Mandal",
+            "PCACVillages"."ClientKey"
+           FROM masters."PCACVillages") m ON g."ACKey" = m."ACKey" AND g."MandalKey" = m."MandalKey" AND g."ClientKey" = m."ClientKey"
+     LEFT JOIN ( SELECT "PCACVillages"."ACKey",
+            "PCACVillages"."MandalKey",
+            "PCACVillages"."VillageKey",
+            "PCACVillages"."Village",
+            "PCACVillages"."ClientKey"
+           FROM masters."PCACVillages") v ON g."ACKey" = v."ACKey" AND g."MandalKey" = v."MandalKey" AND g."VillageKey" = v."VillageKey" AND g."ClientKey" = v."ClientKey";
+
+
+
+
+SELECT setval('connecthub."FilterMeta_ID_seq"', 1, false);
+
+create table connecthub."FilterMeta_bkp" as 
+select * from connecthub."FilterMeta" fm ;
+
+delete from connecthub."FilterMeta";
+
+SELECT dblink_connect('my_connection', 'host=65.0.5.232 dbname=connecthubv2 user=postgres password=pdoCc7M2');
+
+INSERT INTO connecthub."FilterMeta"("ID", "ClientKey", "ColumnName", "Label", "FilterSelectionType", "InitialFilter", "FilterDefaultValue", "MasterQueryLOV", "IsActive", "IsGroupBy", "IsSortable", "IsSelectable", "OridinalPosition", "dataType", datasetid, "FilterSequence", initialview, column_type, "FieldOperators", fieldoperatorstext)
+SELECT *
+FROM dblink('my_connection', 'SELECT * FROM connecthub."FilterMeta"')
+AS t("ID" integer, "ClientKey" integer, "ColumnName" character varying, "Label" character varying, "FilterSelectionType" character varying, "InitialFilter" boolean, "FilterDefaultValue" text, "MasterQueryLOV" text, "IsActive" boolean, "IsGroupBy" boolean, "IsSortable" boolean, "IsSelectable" boolean, "OridinalPosition" integer, "dataType" character varying, datasetid integer, "FilterSequence" integer, initialview boolean, column_type character varying, "FieldOperators" text[], fieldoperatorstext character varying);
+
+SELECT setval('connecthub."FilterMeta_ID_seq"', (SELECT MAX("ID") FROM connecthub."FilterMeta"), false);
+
+
+DROP FUNCTION connecthub."ProcCrudRequestInformation";
+
+CREATE OR REPLACE FUNCTION connecthub."ProcCrudRequestInformation"(_clientkey integer, _lang character, _operation character varying, _userid text, _grievancetype integer, _grievancetext text, _attachments text, _requestedfor json, _requestedby json, _referedby json, _tags text, _additionalinfo json, _grievancestatus integer, _remarks text, _createdby character varying, _modifiedby character varying, _offset integer, _limit integer, _id character varying, _role integer, _priority character varying, _islocationspecific boolean, _locationgranularity character varying, _locationkey json, _summarizedtext text, _grievanceby character varying, _audioattachment text, _subsubjectcode integer, _partycadrestatus character varying, _partycadredetails json, _istemplate boolean, _issuetype character varying)
+ RETURNS text
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+-- variable declaration
+	_return json;
+	_List Record;
+	_GID varchar(60);
+	_query text;
+	 r record;
+	_Cnt int;
+	_condition text;
+	_reqFor json;
+	_reqBy json;
+	_refBy json;
+	_sla int;
+	_members json;
+	_gr_district_loc record;
+	_gr_location_from_requestor json;
+	_grievancemovedby text;
+--exception variables
+    _state   TEXT;
+    _msg     TEXT;
+    _detail  TEXT;
+    _hint    TEXT;
+    _context TEXT;
+begin
+
+	select "SLA" into _sla from hubviews.vw_priority where lower("Priority") = lower(_priority);
+	
+   	if _Operation = 'Insert' then 
+   		
+   		if _ID is null then 
+	   		select * into _GID from connecthub."GenerateUniqueGrievanceKey"(_ClientKey,_lang,_UserID);
+	   	end if;
+		
+   		select 
+		json_agg(json_build_object('ID',a."ID", 'Type', a."Type" ,'data',coalesce(b."obj", c."obj")))
+		into _reqfor
+		from 
+		(select (json_array_elements(_RequestedFor)->>'ID')::int "ID", 
+		(json_array_elements(_RequestedFor)->>'Type') "Type" ) as a
+		left join 
+				(select "RequestorID", a."ClientKey", a."Lang", row_to_json(a)::jsonb||jsonb_build_object('Type','Individual')||jsonb_build_object('OccupationID', b."ID" ,'Occupation', b."Occupation") obj 
+		from connecthub."RequestorInformation" as a 
+		left join masters."OccupationList" as b on a."ClientKey" = b."ClientKey" and a."Occupation" = b."ID"
+		) as b on b."ClientKey" = _ClientKey and  b."Lang" = _Lang and a."ID" = b."RequestorID" and a."Type" = 'Individual'
+		left join 
+		(select "ID", "ClientKey", "Lang",row_to_json(a)::jsonb||jsonb_build_object('Type','Association') obj 
+--		from hubviews."vw_unionInfo" as a) as c on c."ClientKey" = _ClientKey and  c."Lang" = _Lang and a."ID" = c."ID" and a."Type" = 'Association';
+		from hubviews."fn_unionInfo"() as a) as c on c."ClientKey" = _ClientKey and  c."Lang" = _Lang and a."ID" = c."ID" and a."Type" = 'Association';
+	
+		select 
+		json_agg(json_build_object('ID',a."ID", 'Type', a."Type" ,'data',coalesce(b."obj", c."obj")))
+		into _reqBy
+		from 
+		(select (json_array_elements(_RequestedBy)->>'ID')::int "ID", 
+		(json_array_elements(_RequestedBy)->>'Type') "Type" ) as a
+		left join 
+		(select "RequestorID", a."ClientKey", a."Lang", row_to_json(a)::jsonb||jsonb_build_object('Type','Individual')||jsonb_build_object('OccupationID', b."ID" ,'Occupation', b."Occupation") obj 
+		from connecthub."RequestorInformation" as a 
+		left join masters."OccupationList" as b on a."ClientKey" = b."ClientKey" and a."Occupation" = b."ID"
+		) as b on b."ClientKey" = _ClientKey and  b."Lang" = _Lang and a."ID" = b."RequestorID" and a."Type" = 'Individual'
+		left join 
+		(select "ID", "ClientKey", "Lang",row_to_json(a)::jsonb||jsonb_build_object('Type','Association') obj 
+--		from hubviews."vw_unionInfo" as a) as c on c."ClientKey" = _ClientKey and  c."Lang" = _Lang and a."ID" = c."ID" and a."Type" = 'Association';
+		from hubviews."fn_unionInfo"() as a) as c on c."ClientKey" = _ClientKey and  c."Lang" = _Lang and a."ID" = c."ID" and a."Type" = 'Association';
+	
+	
+		select 
+		json_agg(json_build_object('ID',a."ID", 'Type', a."Type" ,'data',coalesce(b."obj", c."obj")))
+		into _refBy
+		from 
+		(select (json_array_elements(_ReferedBy)->>'ID')::int "ID", 
+		(json_array_elements(_ReferedBy)->>'Type') "Type" ) as a
+		left join 
+				(select "RequestorID", a."ClientKey", a."Lang", row_to_json(a)::jsonb||jsonb_build_object('Type','Individual')||jsonb_build_object('OccupationID', b."ID" ,'Occupation', b."Occupation") obj 
+		from connecthub."RequestorInformation" as a 
+		left join masters."OccupationList" as b on a."ClientKey" = b."ClientKey" and a."Occupation" = b."ID"
+		) as b on b."ClientKey" = _ClientKey and  b."Lang" = _Lang and a."ID" = b."RequestorID" and a."Type" = 'Individual'
+		left join 
+		(select "ID", "ClientKey", "Lang",row_to_json(a)::jsonb||jsonb_build_object('Type','Association') obj 
+--		from hubviews."vw_unionInfo" as a) as c on c."ClientKey" = _ClientKey and  c."Lang" = _Lang and a."ID" = c."ID" and a."Type" = 'Association';
+		from hubviews."fn_unionInfo"() as a) as c on c."ClientKey" = _ClientKey and  c."Lang" = _Lang and a."ID" = c."ID" and a."Type" = 'Association';
+	
+		if _istemplate = true then 
+
+			_GrievanceStatus = 4;
+
+		end if;
+
+   	
+   		INSERT INTO connecthub."GrievanceInfo" ("ClientKey","Lang",
+		"GrievanceKey","GrievanceType","GrievanceTypeName","GrievanceText","Attachments",
+		"RequestedFor","RequestedForInfo",
+		"RequestedBy","RequestedByInfo",
+		"ReferedBy","ReferedByInfo",
+		"Tags","AdditionalInfo","GrievanceStatus","Status","IsActive",
+		"Remarks","CreatedBy","CreatedUserName","ModifiedBy", "ModifiedUserName", "Priority", "DueDate", "AssignedTo", "IsLocationSpecific", "LocationGranularity", "LocationKey", "Source", "SummarizedText", "GrievanceBy", "AudioAttachment", "SubSubjectCode"
+		,"PartyCadreStatus","PartyCadreDetails", "DepartmentCode", "Department", "IssueType")
+		VALUES (_ClientKey,_Lang,_GID,_GrievanceType,
+--		(SELECT "GrievanceType" FROM connecthub."GrievanceType" WHERE "ID" = _GrievanceType and "ClientKey"=_ClientKey and "Lang"= _Lang),
+		'Grievance Type is now mapped to Department',
+		_GrievanceText,_Attachments, 
+		_RequestedFor,_reqFor,
+		_RequestedBy,_reqBy,
+		_ReferedBy,_refBy,
+		coalesce(string_to_array(case when _Tags = '' then '0' else _Tags end, ',')::text[],'{0}'::text[]),_AdditionalInfo, coalesce(_GrievanceStatus,1),
+		(SELECT "Status" FROM masters."Status" WHERE "StatusKey" = coalesce(_GrievanceStatus,1) and "ClientKey"=_ClientKey), true,_Remarks,
+		_UserID,
+		(SELECT "UserName" FROM connecthub."UserInfo" WHERE "UserKey" = _UserID AND "ClientKey" = _ClientKey),
+		_UserID,
+		(SELECT "UserName" FROM connecthub."UserInfo" WHERE "UserKey" = _UserID AND "ClientKey" = _ClientKey),
+		_Priority, case when _sla is null then null::date else current_date+_sla end, '0 - 0 - 0 - 0 - 0', 
+		case when _locationgranularity is null then false else true end, coalesce(_locationgranularity,'Not Specified'), _locationkey, 'Meenestham', _SummarizedText, _grievanceby, _audioattachment, _GrievanceType
+		,_partycadrestatus, _partycadredetails, _GrievanceType, (select distinct "HOD" from connecthub."GrievanceType" where "HODKey" = _GrievanceType::Int and "ClientKey"=_ClientKey and "Lang"= _Lang), _issuetype
+		) returning "GrievanceKey" into _List ;
+	
+		for r in select json_array_elements(_RequestedFor) obj
+		loop
+			if r.obj->>'Type' = 'Individual' then
+				insert into connecthub."RequestRequestorList"("ClientKey", "Lang", "GrievanceKey","ReferenceID","ReferenceType", "ReferenceInfo", "ReferenceRelation")
+				select "ClientKey", "Lang", _GID ,"RequestorID",'Individual',row_to_json(a), 'RequestedFor'
+				from connecthub."RequestorInformation" as a where "RequestorID" = (r.obj->>'ID')::int;
+			else 
+				insert into connecthub."RequestRequestorList"("ClientKey", "Lang", "GrievanceKey","ReferenceID","ReferenceType", "ReferenceInfo", "ReferenceRelation")
+				select "ClientKey", "Lang",_GID, "ID", 'Association', row_to_json(a), 'RequestedFor'
+--				from hubviews."vw_unionInfo" as a where "ID" = (r.obj->>'ID')::int;
+				from hubviews."fn_unionInfo"() as a where "ID" = (r.obj->>'ID')::int;
+			
+			end if;
+			
+		end loop;
+	
+		for r in select json_array_elements(_RequestedBy::json) obj
+		loop
+			if r.obj->>'Type' = 'Individual' then
+				insert into connecthub."RequestRequestorList"("ClientKey", "Lang", "GrievanceKey","ReferenceID","ReferenceType", "ReferenceInfo", "ReferenceRelation")
+				select "ClientKey", "Lang", _GID ,"RequestorID",'Individual',row_to_json(a), 'RequestedBy'
+				from connecthub."RequestorInformation" as a where "RequestorID" = (r.obj->>'ID')::int;
+			
+			
+				if exists (select "ConstituencyKey" from connecthub."RequestorInformation"  where "RequestorID" = (r.obj->>'ID')::int) then
+	
+					select distinct "DistrictKey", "District" into _gr_district_loc from masters."PCACVillages" where "ClientKey" = 1 and "ACKey" in 
+					(select "ConstituencyKey" from 
+					connecthub."RequestorInformation"  where "RequestorID"  = (r.obj->>'ID')::int);
+					
+					select 
+					('[{"StateKey": {"ID": 28, "Value": "Andhra Pradesh"}, "DistrictKey": {"ID": '||_gr_district_loc."DistrictKey"||', "Value": "'||_gr_district_loc."District"||'"}, "ACKey": {"ID": '||"ConstituencyKey"||', "Value": "'||"ConstituencyName"||'"}, "MandalKey": {"ID": '||"MandalKey"||', "Value": "'||"Mandal"||'"}, "VillageKey": {"ID": '||"VillageKey"||', "Value": "'||"Village"||'"}}]')::json
+					into _gr_location_from_requestor
+					from connecthub."RequestorInformation"  where "RequestorID"  = (r.obj->>'ID')::int;
+					
+					update connecthub."GrievanceInfo" set "IsLocationSpecific" = true,
+					"LocationGranularity" = 'Village',"LocationKey" = _gr_location_from_requestor
+					where "GrievanceKey" = _GID;
+					
+				end if;
+		
+			else 
+				insert into connecthub."RequestRequestorList"("ClientKey", "Lang", "GrievanceKey","ReferenceID","ReferenceType", "ReferenceInfo", "ReferenceRelation")
+				select "ClientKey", "Lang",_GID, "ID", 'Association', row_to_json(a), 'RequestedBy'
+--				from hubviews."vw_unionInfo" as a where "ID" = (r.obj->>'ID')::int;
+				from hubviews."fn_unionInfo"() as a where "ID" = (r.obj->>'ID')::int;
+			
+			end if;
+			
+		end loop;
+	
+		for r in select json_array_elements(_ReferedBy) obj
+		loop
+			if r.obj->>'Type' = 'Individual' then
+				insert into connecthub."RequestRequestorList"("ClientKey", "Lang", "GrievanceKey","ReferenceID","ReferenceType", "ReferenceInfo", "ReferenceRelation")
+				select "ClientKey", "Lang", _GID ,"RequestorID",'Individual',row_to_json(a), 'ReferedBy'
+				from connecthub."RequestorInformation" as a where "RequestorID" = (r.obj->>'ID')::int;
+			else 
+				insert into connecthub."RequestRequestorList"("ClientKey", "Lang", "GrievanceKey","ReferenceID","ReferenceType", "ReferenceInfo", "ReferenceRelation")
+				select "ClientKey", "Lang",_GID, "ID", 'Association', row_to_json(a), 'ReferedBy'
+--				from hubviews."vw_unionInfo" as a where "ID" = (r.obj->>'ID')::int;
+				from hubviews."fn_unionInfo"() as a where "ID" = (r.obj->>'ID')::int;
+				
+			end if;
+			
+		end loop;
+	
+		
+		_query = 'select json_agg(row_to_json(a)) filter (where rn>'||coalesce(_offset,0)||' and rn<='||coalesce(_offset,0)+coalesce(_Limit,10)||'), count("rn")
+				from
+				(
+--				select row_number() over(order by "ID") rn,
+--				"ID",a."ClientKey",a."Lang","GrievanceKey","GrievanceType","GrievanceTypeName","GrievanceText",
+--				"Attachments","RequestedFor","RequestedForInfo",
+--				"RequestedBy","RequestedByInfo","ReferedBy",
+--				"ReferedByInfo","Tags","AdditionalInfo","GrievanceStatus","Status",
+--				case when "GrievanceStatus" in (0,5) then a."Note" else '''' end "Note",a."Remarks","DueDate",
+--				a."IsActive","Remarks",a."CreatedOn",a."CreatedBy", a."CreatedUserName",a."ModifiedOn",a."ModifiedBy", a."ModifiedUserName" , "Priority", "AssignedTo" "AssignedToKey", b."UserName" as "AssignedTo",
+--				"IsLocationSpecific","LocationGranularity","LocationKey"
+--				from connecthub."GrievanceInfo" as a 
+--				left join connecthub."UserInfo" as b on a."ClientKey" = b."ClientKey" and a."AssignedTo" = b."UserKey"
+
+				select row_number() over(order by "ID") rn,
+				"ID",a."ClientKey",a."Lang",a."GrievanceKey",a."DepartmentCode" "GrievanceType",a."Department" "GrievanceTypeName","GrievanceText",
+				"Attachments","RequestedFor",rf.req "RequestedForInfo",
+				"RequestedBy",rb.req "RequestedByInfo","ReferedBy",
+				rfb.req "ReferedByInfo","Tags","AdditionalInfo","GrievanceStatus","Status",
+				case when "GrievanceStatus" in (0,5) then a."Note" else '''' end "Note",a."Remarks","DueDate",
+				a."IsActive","Remarks",a."CreatedOn",a."CreatedBy", a."CreatedUserName",a."ModifiedOn",a."ModifiedBy", a."ModifiedUserName" , "Priority", "AssignedTo" "AssignedToKey", 
+				b."UserName" as "AssignedTo",
+				"IsLocationSpecific","LocationGranularity","LocationKey", "GrievanceBy", "AudioAttachment"
+				, "PartyCadreStatus","PartyCadreDetails"
+				from (select * from connecthub."GrievanceInfo" where "GrievanceKey"= '||quote_literal(_List."GrievanceKey")||' ) as a 
+				left join 
+				(
+					select 
+					a."GrievanceKey", a."ClientKey",
+					json_agg(json_build_object(''ID'', a."ReferenceID",''Type'', a."ReferenceType" ,''data'',case when a."ReferenceType" = ''Individual'' then 
+					(row_to_json(r)::jsonb||jsonb_build_object(''Type'', ''Individual''))  else (row_to_json(u)::jsonb||jsonb_build_object(''Type'', ''Association''))  end)
+					)req
+					from  connecthub."RequestRequestorList" as a
+					left join hubviews.requestor_details_v1 as r on a."ClientKey" = r."ClientKey" and a."ReferenceID" = r."RequestorID" and a."ReferenceType" = ''Individual''
+--					left join hubviews."vw_unionInfo" as u on a."ClientKey" = u."ClientKey" and a."ReferenceID" = u."ID" and a."ReferenceType" = ''Association''
+					left join hubviews."fn_unionInfo"() as u on a."ClientKey" = u."ClientKey" and a."ReferenceID" = u."ID" and a."ReferenceType" = ''Association''
+					where "ReferenceRelation" = ''RequestedBy'' 
+					 and
+					'||case when _ID is null then quote_literal('1') else 'a."GrievanceKey"' end ||'='||quote_literal(coalesce(_ID,'1'))||'
+					and a."ClientKey" = '||_ClientKey||' and a."Lang" = '||quote_literal(_Lang)||' 
+					group by a."GrievanceKey", a."ClientKey"
+				)
+				as rb on a."ClientKey" = rb."ClientKey" and a."GrievanceKey" = rb."GrievanceKey" 
+				left join 
+				(
+					select 
+					a."GrievanceKey", a."ClientKey",
+					json_agg(json_build_object(''ID'', a."ReferenceID",''Type'', a."ReferenceType" ,''data'',case when a."ReferenceType" = ''Individual'' then 
+					(row_to_json(r)::jsonb||jsonb_build_object(''Type'', ''Individual''))  else (row_to_json(u)::jsonb||jsonb_build_object(''Type'', ''Association''))  end)
+					)req
+					from  connecthub."RequestRequestorList" as a
+					left join hubviews.requestor_details_v1 as r on a."ClientKey" = r."ClientKey" and a."ReferenceID" = r."RequestorID" and a."ReferenceType" = ''Individual''
+--					left join hubviews."vw_unionInfo" as u on a."ClientKey" = u."ClientKey" and a."ReferenceID" = u."ID" and a."ReferenceType" = ''Association''
+					left join hubviews."fn_unionInfo"() as u on a."ClientKey" = u."ClientKey" and a."ReferenceID" = u."ID" and a."ReferenceType" = ''Association''
+					where "ReferenceRelation" = ''RequestedFor'' 
+					 and
+					'||case when _ID is null then quote_literal('1') else 'a."GrievanceKey"' end ||'='||quote_literal(coalesce(_ID,'1'))||'
+					and a."ClientKey" = '||_ClientKey||' and a."Lang" = '||quote_literal(_Lang)||'
+					group by a."GrievanceKey", a."ClientKey"
+				)
+				as rf on a."ClientKey" = rf."ClientKey" and a."GrievanceKey" = rf."GrievanceKey" 
+				left join 
+				(
+					select 
+					a."GrievanceKey", a."ClientKey",
+					json_agg(json_build_object(''ID'', a."ReferenceID",''Type'', a."ReferenceType" ,''data'',case when a."ReferenceType" = ''Individual'' then 
+					(row_to_json(r)::jsonb||jsonb_build_object(''Type'', ''Individual''))  else (row_to_json(u)::jsonb||jsonb_build_object(''Type'', ''Association''))  end)
+					)req
+					from  connecthub."RequestRequestorList" as a
+					left join hubviews.requestor_details_v1 as r on a."ClientKey" = r."ClientKey" and a."ReferenceID" = r."RequestorID" and a."ReferenceType" = ''Individual''
+--					left join hubviews."vw_unionInfo" as u on a."ClientKey" = u."ClientKey" and a."ReferenceID" = u."ID" and a."ReferenceType" = ''Association''
+					left join hubviews."fn_unionInfo"() as u on a."ClientKey" = u."ClientKey" and a."ReferenceID" = u."ID" and a."ReferenceType" = ''Association''
+					where "ReferenceRelation" = ''ReferedBy'' 
+					 and
+					'||case when _ID is null then quote_literal('1') else 'a."GrievanceKey"' end ||'='||quote_literal(coalesce(_ID,'1'))||'
+					and a."ClientKey" = '||_ClientKey||' and a."Lang" = '||quote_literal(_Lang)||'
+					group by a."GrievanceKey", a."ClientKey"
+				)
+				as rfb on a."ClientKey" = rfb."ClientKey" and a."GrievanceKey" = rfb."GrievanceKey" 
+				left join connecthub."UserInfo" as b on a."ClientKey" = b."ClientKey" and a."AssignedTo" = b."UserKey"
+				where
+				'||case when _ID is null then quote_literal('1') else 'a."GrievanceKey"' end ||'='||quote_literal(coalesce(_ID,'1'))||'
+				and a."ClientKey" = '||_ClientKey||' and a."Lang" = '||quote_literal(_Lang)||'
+				) as a';
+		
+		raise notice '%', _query;
+		execute _query into _return,_Cnt;
+		_return = json_build_object('Status','Success', 'Details', json_build_object('List', _return, 'TotalRecords', _Cnt));
+	
+		
+--		_return = json_build_object('Status','Success', 'Details', json_build_object('List', _List));
+	
+   	elsif _Operation = 'Update' then
+
+		if ( select "GrievanceStatus" from connecthub."GrievanceInfo" where "GrievanceKey" = _ID AND "ClientKey" = _ClientKey AND "Lang" = _Lang) = 4 then 
+
+			_return = json_build_object('Status','Fail', 'Details', 'Re-Solved Grievances can''t be edited');
+
+		elsif not exists( select * from connecthub."GrievanceInfo" where "GrievanceKey" = _ID AND "ClientKey" = _ClientKey AND "Lang" = _Lang and "GrievanceStatus" = 7) then 
+
+			_return = json_build_object('Status','Fail', 'Details', 'Draft Grievance is already moved to Grievance');
+
+		else
+
+	   		raise notice '%',1;
+	   		select 
+			json_agg(json_build_object('ID',a."ID", 'Type', a."Type" ,'data',coalesce(b."obj", c."obj")))
+			into _reqfor
+			from 
+			(select (json_array_elements(_RequestedFor)->>'ID')::int "ID", 
+			(json_array_elements(_RequestedFor)->>'Type') "Type" ) as a
+			left join 
+					(select "RequestorID", a."ClientKey", a."Lang", row_to_json(a)::jsonb||jsonb_build_object('Type','Individual')||jsonb_build_object('OccupationID', b."ID" ,'Occupation', b."Occupation") obj 
+			from connecthub."RequestorInformation" as a 
+			left join masters."OccupationList" as b on a."ClientKey" = b."ClientKey" and a."Occupation" = b."ID"
+			) as b on b."ClientKey" = _ClientKey and  b."Lang" = _Lang and a."ID" = b."RequestorID" and a."Type" = 'Individual'
+			left join 
+			(select "ID", "ClientKey", "Lang",row_to_json(a)::jsonb||jsonb_build_object('Type','Association') obj 
+	--		from hubviews."vw_unionInfo" as a) as c on c."ClientKey" = _ClientKey and  c."Lang" = _Lang and a."ID" = c."ID" and a."Type" = 'Association';
+			from hubviews."fn_unionInfo"() as a) as c on c."ClientKey" = _ClientKey and  c."Lang" = _Lang and a."ID" = c."ID" and a."Type" = 'Association';
+		
+			raise notice '%',2;
+			select 
+			json_agg(json_build_object('ID',a."ID", 'Type', a."Type" ,'data',coalesce(b."obj", c."obj")))
+			into _reqBy
+			from 
+			(select (json_array_elements(_RequestedBy)->>'ID')::int "ID", 
+			(json_array_elements(_RequestedBy)->>'Type') "Type" ) as a
+			left join 
+			(select "RequestorID", a."ClientKey", a."Lang", row_to_json(a)::jsonb||jsonb_build_object('Type','Individual')||jsonb_build_object('OccupationID', b."ID" ,'Occupation', b."Occupation") obj 
+			from connecthub."RequestorInformation" as a 
+			left join masters."OccupationList" as b on a."ClientKey" = b."ClientKey" and a."Occupation" = b."ID"
+			) as b on b."ClientKey" = _ClientKey and  b."Lang" = _Lang and a."ID" = b."RequestorID" and a."Type" = 'Individual'
+			left join 
+			(select "ID", "ClientKey", "Lang",row_to_json(a)::jsonb||jsonb_build_object('Type','Association') obj 
+	--		from hubviews."vw_unionInfo" as a) as c on c."ClientKey" = _ClientKey and  c."Lang" = _Lang and a."ID" = c."ID" and a."Type" = 'Association';
+			from hubviews."fn_unionInfo"() as a) as c on c."ClientKey" = _ClientKey and  c."Lang" = _Lang and a."ID" = c."ID" and a."Type" = 'Association';
+		
+			raise notice '%',3;
+			select 
+			json_agg(json_build_object('ID',a."ID", 'Type', a."Type" ,'data',coalesce(b."obj", c."obj")))
+			into _refBy
+			from 
+			(select (json_array_elements(_ReferedBy)->>'ID')::int "ID", 
+			(json_array_elements(_ReferedBy)->>'Type') "Type" ) as a
+			left join 
+			(select "RequestorID", a."ClientKey", a."Lang", row_to_json(a)::jsonb||jsonb_build_object('Type','Individual')||jsonb_build_object('OccupationID', b."ID" ,'Occupation', b."Occupation") obj 
+			from connecthub."RequestorInformation" as a 
+			left join masters."OccupationList" as b on a."ClientKey" = b."ClientKey" and a."Occupation" = b."ID"
+			) as b on b."ClientKey" = _ClientKey and  b."Lang" = _Lang and a."ID" = b."RequestorID" and a."Type" = 'Individual'
+			left join 
+			(select "ID", "ClientKey", "Lang",row_to_json(a)::jsonb||jsonb_build_object('Type','Association') obj 
+	--		from hubviews."vw_unionInfo" as a) as c on c."ClientKey" = _ClientKey and  c."Lang" = _Lang and a."ID" = c."ID" and a."Type" = 'Association';
+			from hubviews."fn_unionInfo"() as a) as c on c."ClientKey" = _ClientKey and  c."Lang" = _Lang and a."ID" = c."ID" and a."Type" = 'Association';
+			
+	--	
+			if _GrievanceStatus = 7 and _GrievanceType is not null and _Priority is not null then 
+	
+				_GrievanceStatus = 1;
+	
+				_grievancemovedby = _userid;
+	
+				select json_agg(row_to_json(a)) into _members from ( 
+				select "RequestorID" "ID","RequestorFirstName"||' '||"RequestorLastName" "Name","RequestorTypeName" "Type","Mobile" "Contact", 'Requester' "RequestorRelation" from connecthub."RequestorInformation" ri where ("RequestorID","RequestorTypeName") in (select (json_Array_elements(_RequestedBy::json)->>'ID')::int, json_Array_elements(_RequestedBy::json)->>'Type')
+				union 
+				select "RequestorID" "ID","RequestorFirstName"||' '||"RequestorLastName" "Name","RequestorTypeName" "Type","Mobile" "Contact", 'Beneficiary' "RequestorRelation" from connecthub."RequestorInformation" ri where ("RequestorID","RequestorTypeName") in (select (json_Array_elements(_RequestedFor::json)->>'ID')::int, json_Array_elements(_RequestedFor::json)->>'Type')
+				union 
+				select "RequestorID" "ID","RequestorFirstName"||' '||"RequestorLastName" "Name","RequestorTypeName" "Type","Mobile" "Contact", 'Referrer' "RequestorRelation" from connecthub."RequestorInformation" ri where ("RequestorID","RequestorTypeName") in (select (json_Array_elements(_ReferedBy::json)->>'ID')::int, json_Array_elements(_ReferedBy::json)->>'Type')
+				) a;
+	
+			end if;	
+	
+			raise notice '%',4;
+			update connecthub."GrievanceDraft" 
+			set "GrievanceText" = _GrievanceText,
+				"Attachments" = _Attachments,
+				"Members" = _members,
+				"ModifiedOn" = current_timestamp,
+				"ModifiedBy" = _UserID,
+				"Status" = _GrievanceStatus,
+				"SummarizedText" = _SummarizedText,
+				"GrievanceBy" = _grievanceby,
+				"AudioAttachment" = _audioattachment
+			where "GrievanceKey" = _ID AND "ClientKey" = _ClientKey AND "Lang" = _Lang;
+	   
+			raise notice '%',5;
+		   	UPDATE connecthub."GrievanceInfo"
+			SET 
+		    "GrievanceType" = _GrievanceType,
+			"DepartmentCode" = _GrievanceType,
+			"Department" = (select distinct "HOD" from connecthub."GrievanceType" where "HODKey" = _GrievanceType::int and "ClientKey"=_ClientKey and "Lang"= _Lang),
+		    "GrievanceTypeName" = (SELECT "GrievanceType" FROM connecthub."GrievanceType" WHERE "ID" = _GrievanceType AND "ClientKey" = _ClientKey AND "Lang" = _Lang),
+		    "GrievanceText" = _GrievanceText,
+		    "Attachments" = _Attachments,
+		    "RequestedFor" = _RequestedFor,
+		    "RequestedForInfo" = _reqFor,
+		    "RequestedBy" = _RequestedBy,
+		    "RequestedByInfo" = _ReqBy,
+		    "ReferedBy" = _ReferedBy,
+		    "ReferedByInfo" = _refBy,
+		    "Tags" = coalesce(string_to_array(case when _Tags = '' then '0' else _Tags end, ',')::text[], '{0}'),
+		    "AdditionalInfo" = _AdditionalInfo,
+		    "GrievanceStatus" = _GrievanceStatus,
+		    "Status" = (SELECT "Status" FROM masters."Status" WHERE "StatusKey" = _GrievanceStatus AND "ClientKey" = _ClientKey AND "Lang" = _Lang),
+		    "IsActive" = true,
+		    "Remarks" = _Remarks,
+		    "CreatedOn" = case when "GrievanceStatus" = 7 then current_timestamp else "CreatedOn" end,
+		    "ModifiedBy" = _UserID,
+		    "ModifiedUserName" = (SELECT "UserName" FROM connecthub."UserInfo" WHERE "UserKey" = _UserID AND "ClientKey" = _ClientKey),
+		    "ModifiedOn" = CURRENT_TIMESTAMP,
+		    "Priority" = _Priority,
+		    "IsLocationSpecific" = case when _locationgranularity is null then false else true end , 
+		    "LocationGranularity" = _locationgranularity,
+		    "LocationKey" = _locationkey,
+		    "SummarizedText" = _SummarizedText,
+			"GrievanceBy" = _grievanceby,
+			"AudioAttachment" = _audioattachment,
+			"DueDate" = case when _sla is null then null::date else current_date+_sla end,
+			"SubSubjectCode" = _GrievanceType,
+			"PartyCadreStatus" = _partycadrestatus,
+			"PartyCadreDetails" = _partycadredetails,
+			"CreatedBy" = coalesce(_grievancemovedby,"CreatedBy"),
+			"CreatedUserName" = (SELECT "UserName" FROM connecthub."UserInfo" WHERE "UserKey" = _grievancemovedby AND "ClientKey" = _ClientKey)
+			WHERE "GrievanceKey" = _ID AND "ClientKey" = _ClientKey AND "Lang" = _Lang;
+	   	
+		
+			delete from connecthub."RequestRequestorList" where "ClientKey" = _ClientKey and "Lang" = _Lang and "GrievanceKey" = _ID;
+		
+			raise notice '%',6;
+			for r in select json_array_elements(_RequestedFor) obj
+			loop
+				if r.obj->>'Type' = 'Individual' then
+					insert into connecthub."RequestRequestorList"("ClientKey", "Lang", "GrievanceKey","ReferenceID","ReferenceType", "ReferenceInfo", "ReferenceRelation")
+					select "ClientKey", "Lang", _ID ,"RequestorID",'Individual',row_to_json(a), 'RequestedFor'
+					from connecthub."RequestorInformation" as a where "RequestorID" = (r.obj->>'ID')::int;
+				else 
+					insert into connecthub."RequestRequestorList"("ClientKey", "Lang", "GrievanceKey","ReferenceID","ReferenceType", "ReferenceInfo", "ReferenceRelation")
+					select "ClientKey", "Lang",_ID, "ID", 'Association', row_to_json(a), 'RequestedFor'
+	--				from hubviews."vw_unionInfo" as a where "ID" = (r.obj->>'ID')::int;
+					from hubviews."fn_unionInfo"() as a where "ID" = (r.obj->>'ID')::int;
+					
+				end if;
+				
+			end loop;
+		
+			raise notice '%',7;
+			for r in select json_array_elements(_RequestedBy) obj
+			loop
+				if r.obj->>'Type' = 'Individual' then
+					insert into connecthub."RequestRequestorList"("ClientKey", "Lang", "GrievanceKey","ReferenceID","ReferenceType", "ReferenceInfo", "ReferenceRelation")
+					select "ClientKey", "Lang", _ID ,"RequestorID",'Individual',row_to_json(a), 'RequestedBy'
+					from connecthub."RequestorInformation" as a where "RequestorID" = (r.obj->>'ID')::int;
+				
+				
+				
+					if exists (select "ConstituencyKey" from connecthub."RequestorInformation"  where "RequestorID" = (r.obj->>'ID')::int) then
+		
+						select distinct "DistrictKey", "District" into _gr_district_loc from masters."PCACVillages" where "ACKey" in 
+						(select "ConstituencyKey" from 
+						connecthub."RequestorInformation"  where "RequestorID"  = (r.obj->>'ID')::int);
+						
+						select 
+						('[{"StateKey": {"ID": 28, "Value": "Andhra Pradesh"}, "DistrictKey": {"ID": '||_gr_district_loc."DistrictKey"||', "Value": "'||_gr_district_loc."District"||'"}, "ACKey": {"ID": '||"ConstituencyKey"||', "Value": "'||"ConstituencyName"||'"}, "MandalKey": {"ID": '||"MandalKey"||', "Value": "'||"Mandal"||'"}, "VillageKey": {"ID": '||"VillageKey"||', "Value": "'||"Village"||'"}}]')::json
+						into _gr_location_from_requestor
+						from connecthub."RequestorInformation"  where "RequestorID"  = (r.obj->>'ID')::int;
+						
+						update connecthub."GrievanceInfo" set "IsLocationSpecific" = true,
+						"LocationGranularity" = 'Village',"LocationKey" = _gr_location_from_requestor
+						where "GrievanceKey" = _ID;
+						
+					end if;
+				else 
+					insert into connecthub."RequestRequestorList"("ClientKey", "Lang", "GrievanceKey","ReferenceID","ReferenceType", "ReferenceInfo", "ReferenceRelation")
+					select "ClientKey", "Lang",_ID, "ID", 'Association', row_to_json(a), 'RequestedBy'
+	--				from hubviews."vw_unionInfo" as a where "ID" = (r.obj->>'ID')::int;
+					from hubviews."fn_unionInfo"() as a where "ID" = (r.obj->>'ID')::int;
+				end if;
+				
+			end loop;
+		
+			raise notice '%',8;
+			for r in select json_array_elements(_ReferedBy) obj
+			loop
+				if r.obj->>'Type' = 'Individual' then
+					insert into connecthub."RequestRequestorList"("ClientKey", "Lang", "GrievanceKey","ReferenceID","ReferenceType", "ReferenceInfo", "ReferenceRelation")
+					select "ClientKey", "Lang", _ID ,"RequestorID",'Individual',row_to_json(a), 'ReferedBy'
+					from connecthub."RequestorInformation" as a where "RequestorID" = (r.obj->>'ID')::int;
+				else 
+					insert into connecthub."RequestRequestorList"("ClientKey", "Lang", "GrievanceKey","ReferenceID","ReferenceType", "ReferenceInfo", "ReferenceRelation")
+					select "ClientKey", "Lang",_ID, "ID", 'Association', row_to_json(a), 'ReferedBy'
+	--				from hubviews."vw_unionInfo" as a where "ID" = (r.obj->>'ID')::int;
+					from hubviews."fn_unionInfo"() as a where "ID" = (r.obj->>'ID')::int;
+					
+				end if;
+				
+			end loop;
+			raise notice '%',9;
+		
+			_query = 'select json_agg(row_to_json(a)) filter (where rn>'||coalesce(_offset,0)||' and rn<='||coalesce(_offset,0)+coalesce(_Limit,10)||'), count("rn")
+					from
+					(
+	--				select row_number() over(order by "ID") rn,
+	--				"ID",a."ClientKey",a."Lang","GrievanceKey","GrievanceType","GrievanceTypeName","GrievanceText",
+	--				"Attachments","RequestedFor","RequestedForInfo",
+	--				"RequestedBy","RequestedByInfo","ReferedBy",
+	--				"ReferedByInfo","Tags","AdditionalInfo","GrievanceStatus","Status",
+	--				case when "GrievanceStatus" in (0,5) then a."Note" else '''' end "Note",a."Remarks","DueDate",
+	--				a."IsActive","Remarks",a."CreatedOn",a."CreatedBy", a."CreatedUserName",a."ModifiedOn",a."ModifiedBy", a."ModifiedUserName" , "Priority", "AssignedTo" "AssignedToKey", b."UserName" as "AssignedTo",
+	--				"IsLocationSpecific","LocationGranularity","LocationKey"
+	--				from connecthub."GrievanceInfo" as a 
+	--				left join connecthub."UserInfo" as b on a."ClientKey" = b."ClientKey" and a."AssignedTo" = b."UserKey"
+	
+					select row_number() over(order by "ID") rn,
+					"ID",a."ClientKey",a."Lang",a."GrievanceKey",a."DepartmentCode" "GrievanceType",a."Department" "GrievanceTypeName","GrievanceText",
+					"Attachments","RequestedFor",rf.req "RequestedForInfo",
+					"RequestedBy",rb.req "RequestedByInfo","ReferedBy",
+					rfb.req "ReferedByInfo","Tags","AdditionalInfo","GrievanceStatus","Status",
+					case when "GrievanceStatus" in (0,5) then a."Note" else '''' end "Note",a."Remarks","DueDate",
+					a."IsActive","Remarks",a."CreatedOn",a."CreatedBy", a."CreatedUserName",a."ModifiedOn",a."ModifiedBy", a."ModifiedUserName" , "Priority", "AssignedTo" "AssignedToKey", 
+					b."UserName" as "AssignedTo",
+					"IsLocationSpecific","LocationGranularity","LocationKey", "GrievanceBy", "AudioAttachment", "SubSubjectCode"
+					,"PartyCadreStatus","PartyCadreDetails"
+					from (select * from connecthub."GrievanceInfo" where "GrievanceKey"= '||quote_literal(_ID)||' ) as a 
+					left join 
+					(
+						select 
+						a."GrievanceKey", a."ClientKey",
+						json_agg(json_build_object(''ID'', a."ReferenceID",''Type'', a."ReferenceType" ,''data'',case when a."ReferenceType" = ''Individual'' then 
+						(row_to_json(r)::jsonb||jsonb_build_object(''Type'', ''Individual''))  else (row_to_json(u)::jsonb||jsonb_build_object(''Type'', ''Association''))  end)
+						)req
+						from  connecthub."RequestRequestorList" as a
+						left join hubviews.requestor_details_v1 as r on a."ClientKey" = r."ClientKey" and a."ReferenceID" = r."RequestorID" and a."ReferenceType" = ''Individual''
+	--					left join hubviews."vw_unionInfo" as u on a."ClientKey" = u."ClientKey" and a."ReferenceID" = u."ID" and a."ReferenceType" = ''Association''
+						left join hubviews."fn_unionInfo"() as u on a."ClientKey" = u."ClientKey" and a."ReferenceID" = u."ID" and a."ReferenceType" = ''Association''
+						where "ReferenceRelation" = ''RequestedBy'' 
+						 and
+						'||case when _ID is null then quote_literal('1') else 'a."GrievanceKey"' end ||'='||quote_literal(coalesce(_ID,'1'))||'
+						and a."ClientKey" = '||_ClientKey||' and a."Lang" = '||quote_literal(_Lang)||' 
+						group by a."GrievanceKey", a."ClientKey"
+					)
+					as rb on a."ClientKey" = rb."ClientKey" and a."GrievanceKey" = rb."GrievanceKey" 
+					left join 
+					(
+						select 
+						a."GrievanceKey", a."ClientKey",
+						json_agg(json_build_object(''ID'', a."ReferenceID",''Type'', a."ReferenceType" ,''data'',case when a."ReferenceType" = ''Individual'' then 
+						(row_to_json(r)::jsonb||jsonb_build_object(''Type'', ''Individual''))  else (row_to_json(u)::jsonb||jsonb_build_object(''Type'', ''Association''))  end)
+						)req
+						from  connecthub."RequestRequestorList" as a
+						left join hubviews.requestor_details_v1 as r on a."ClientKey" = r."ClientKey" and a."ReferenceID" = r."RequestorID" and a."ReferenceType" = ''Individual''
+	--					left join hubviews."vw_unionInfo" as u on a."ClientKey" = u."ClientKey" and a."ReferenceID" = u."ID" and a."ReferenceType" = ''Association''
+						left join hubviews."fn_unionInfo"() as u on a."ClientKey" = u."ClientKey" and a."ReferenceID" = u."ID" and a."ReferenceType" = ''Association''
+						where "ReferenceRelation" = ''RequestedFor'' 
+						 and
+						'||case when _ID is null then quote_literal('1') else 'a."GrievanceKey"' end ||'='||quote_literal(coalesce(_ID,'1'))||'
+						and a."ClientKey" = '||_ClientKey||' and a."Lang" = '||quote_literal(_Lang)||'
+						group by a."GrievanceKey", a."ClientKey"
+					)
+					as rf on a."ClientKey" = rf."ClientKey" and a."GrievanceKey" = rf."GrievanceKey" 
+					left join 
+					(
+						select 
+						a."GrievanceKey", a."ClientKey",
+						json_agg(json_build_object(''ID'', a."ReferenceID",''Type'', a."ReferenceType" ,''data'',case when a."ReferenceType" = ''Individual'' then 
+						(row_to_json(r)::jsonb||jsonb_build_object(''Type'', ''Individual''))  else (row_to_json(u)::jsonb||jsonb_build_object(''Type'', ''Association''))  end)
+						)req
+						from  connecthub."RequestRequestorList" as a
+						left join hubviews.requestor_details_v1 as r on a."ClientKey" = r."ClientKey" and a."ReferenceID" = r."RequestorID" and a."ReferenceType" = ''Individual''
+	--					left join hubviews."vw_unionInfo" as u on a."ClientKey" = u."ClientKey" and a."ReferenceID" = u."ID" and a."ReferenceType" = ''Association''
+						left join hubviews."fn_unionInfo"() as u on a."ClientKey" = u."ClientKey" and a."ReferenceID" = u."ID" and a."ReferenceType" = ''Association''
+						where "ReferenceRelation" = ''ReferedBy'' 
+						 and
+						'||case when _ID is null then quote_literal('1') else 'a."GrievanceKey"' end ||'='||quote_literal(coalesce(_ID,'1'))||'
+						and a."ClientKey" = '||_ClientKey||' and a."Lang" = '||quote_literal(_Lang)||'
+						group by a."GrievanceKey", a."ClientKey"
+					)
+					as rfb on a."ClientKey" = rfb."ClientKey" and a."GrievanceKey" = rfb."GrievanceKey" 
+					left join connecthub."UserInfo" as b on a."ClientKey" = b."ClientKey" and a."AssignedTo" = b."UserKey"
+					where
+					'||case when _ID is null then quote_literal('1') else 'a."GrievanceKey"' end ||'='||quote_literal(coalesce(_ID,'1'))||'
+					and a."ClientKey" = '||_ClientKey||' and a."Lang" = '||quote_literal(_Lang)||'
+					) as a';
+			
+			raise notice '%', _query;
+			execute _query into _return,_Cnt;
+			_return = json_build_object('Status','Success', 'Details', json_build_object('List', _return, 'TotalRecords', _Cnt));
+
+		end if;
+	
+--		_return = json_build_object('Status','Success', 'Details', json_build_object('List', _List));
+	
+	elsif _Operation = 'Delete' then 
+	
+	elsif _Operation = 'Get' then
+	
+		if _role = 1 then 	
+			_condition = '';
+		elsif _role = 2 then
+			_condition = '';
+		elsif _role = 3 then
+			_condition = '';
+		elsif _role = 4 then
+			_condition = '"GrievanceStatus" = 1 ';
+		elsif _role = 5 then
+			_condition = '"CreatedBy" = '||quote_literal(_UserID)||' ';
+		else 
+			_condition = '"CreatedBy" = '||quote_literal(_UserID)||' ';
+		end if;
+	
+		_query = 'select json_agg(row_to_json(a)) filter (where rn>'||coalesce(_offset,0)||' and rn<='||coalesce(_offset,0)+coalesce(_Limit,10)||'), count("rn")
+				from
+				(
+--				select row_number() over(order by "ID") rn,
+--				"ID",a."ClientKey",a."Lang","GrievanceKey","GrievanceType","GrievanceTypeName","GrievanceText",
+--				"Attachments","RequestedFor","RequestedForInfo",
+--				"RequestedBy","RequestedByInfo","ReferedBy",
+--				"ReferedByInfo","Tags","AdditionalInfo","GrievanceStatus","Status",
+--				case when "GrievanceStatus" in (0,5) then a."Note" else '''' end "Note",a."Remarks","DueDate",
+--				a."IsActive","Remarks",a."CreatedOn",a."CreatedBy", a."CreatedUserName",a."ModifiedOn",a."ModifiedBy", a."ModifiedUserName" , "Priority", "AssignedTo" "AssignedToKey", b."UserName" as "AssignedTo",
+--				"IsLocationSpecific","LocationGranularity","LocationKey", a."PostedToPGRS"
+--				from connecthub."GrievanceInfo" as a 
+--				left join connecthub."UserInfo" as b on a."ClientKey" = b."ClientKey" and a."AssignedTo" = b."UserKey"
+
+				select row_number() over(order by a."ID") rn,
+				a."ID",a."ClientKey",a."Lang",a."GrievanceKey",a."DepartmentCode" "GrievanceType",a."Department" "GrievanceTypeName","GrievanceText",
+				"Attachments","RequestedFor",rf.req "RequestedForInfo",
+				"RequestedBy",rb.req "RequestedByInfo","ReferedBy",
+				rfb.req "ReferedByInfo","Tags","AdditionalInfo","GrievanceStatus","Status",
+				case when "GrievanceStatus" in (0,5) then a."Note" else '''' end "Note",a."Remarks","DueDate",
+				a."IsActive","Remarks",a."CreatedOn",a."CreatedBy", a."CreatedUserName",a."ModifiedOn",a."ModifiedBy", a."ModifiedUserName" , "Priority", "AssignedTo" "AssignedToKey", 
+				b."UserName" as "AssignedTo",
+				"IsLocationSpecific","LocationGranularity","LocationKey", "GrievanceBy", "AudioAttachment", 
+				s."SubSubject" ,"SubSubjectCode", s."HOD" , s."HODKey" , s."Department" , s."DepartmentKey", s."Subject"  , s."SubjectKey" 
+--				, "HOD"||'' ~ ''||"Subject"||'' ~ ''||"SubSubject" "Type"
+				,s."Type"
+				,a."PartyCadreStatus", a."PartyCadreDetails"
+--				,v.cluster_incharge ,v.cluster_incharge_mobile , v.unit_incharge , v.unit_incharge_mobile , v.booth_incharge , v.booth_incharge_mobile 
+				, a."PostedToPGRS"
+				from connecthub."GrievanceInfo" as a 
+				left join 
+				( SELECT 
+                    coalesce(a."HODKey"::text, b."HODKey") "HODKey",
+			        coalesce(a."HOD", b."HOD") "HOD",
+			        coalesce(a."DepartmentKey"::text, b."DepartmentKey" ) "DepartmentKey",
+			        coalesce(a."Department", b."Department" ) "Department",
+			        b."SubjectKey",
+			        b."Subject",
+			        coalesce(a."ID"::text,b."SubSubjectKey") "SubSubjectKey",
+			        coalesce(a."GrievanceType", b."SubSubject")::text "SubSubject",
+			        b."ID",
+			        coalesce(a."ClientKey", b."ClientKey") "ClientKey",
+			        b."Lang",
+			        b."Officer",
+			        b."Title",
+			        b."Description",
+			        coalesce("SubSubject","GrievanceType")||'' ~ ''||a."HOD"  "Type" 
+                   FROM masters."Subject" b
+						right join connecthub."GrievanceType" a
+						on a."ID" = b."SubSubjectKey"::int
+						AND a."ClientKey" = b."ClientKey"
+						AND a."Lang" = b."Lang") s on a."SubSubjectCode" = s."SubSubjectKey"::int and a."ClientKey" = s."ClientKey"
+--				left join masters."Subject" s on a."SubSubjectCode" = s."SubSubjectKey"::int and a."ClientKey" = s."ClientKey"
+				left join 
+				(
+					select 
+					a."GrievanceKey", a."ClientKey",
+					json_agg(json_build_object(''ID'', a."ReferenceID",''Type'', a."ReferenceType" ,''data'',case when a."ReferenceType" = ''Individual'' then 
+					(row_to_json(r)::jsonb||jsonb_build_object(''Type'', ''Individual''))  else (row_to_json(u)::jsonb||jsonb_build_object(''Type'', ''Association''))  end)
+					)req
+					from  connecthub."RequestRequestorList" as a
+					left join hubviews.requestor_details_v1 as r on a."ClientKey" = r."ClientKey" and a."ReferenceID" = r."RequestorID" and a."ReferenceType" = ''Individual''
+--					left join hubviews."vw_unionInfo" as u on a."ClientKey" = u."ClientKey" and a."ReferenceID" = u."ID" and a."ReferenceType" = ''Association''
+					left join hubviews."fn_unionInfo"() as u on a."ClientKey" = u."ClientKey" and a."ReferenceID" = u."ID" and a."ReferenceType" = ''Association''
+					where "ReferenceRelation" = ''RequestedBy'' 
+					 and
+					'||case when _ID is null then quote_literal('1') else 'a."GrievanceKey"' end ||'='||quote_literal(coalesce(_ID,'1'))||'
+					and a."ClientKey" = '||_ClientKey||' and a."Lang" = '||quote_literal(_Lang)||' 
+					group by a."GrievanceKey", a."ClientKey"
+				)
+				as rb on a."ClientKey" = rb."ClientKey" and a."GrievanceKey" = rb."GrievanceKey" 
+				left join 
+				(
+					select 
+					a."GrievanceKey", a."ClientKey",
+					json_agg(json_build_object(''ID'', a."ReferenceID",''Type'', a."ReferenceType" ,''data'',case when a."ReferenceType" = ''Individual'' then 
+					(row_to_json(r)::jsonb||jsonb_build_object(''Type'', ''Individual''))  else (row_to_json(u)::jsonb||jsonb_build_object(''Type'', ''Association''))  end)
+					)req
+					from  connecthub."RequestRequestorList" as a
+					left join hubviews.requestor_details_v1 as r on a."ClientKey" = r."ClientKey" and a."ReferenceID" = r."RequestorID" and a."ReferenceType" = ''Individual''
+--					left join hubviews."vw_unionInfo" as u on a."ClientKey" = u."ClientKey" and a."ReferenceID" = u."ID" and a."ReferenceType" = ''Association''
+					left join hubviews."fn_unionInfo"() as u on a."ClientKey" = u."ClientKey" and a."ReferenceID" = u."ID" and a."ReferenceType" = ''Association''
+					where "ReferenceRelation" = ''RequestedFor'' 
+					 and
+					'||case when _ID is null then quote_literal('1') else 'a."GrievanceKey"' end ||'='||quote_literal(coalesce(_ID,'1'))||'
+					and a."ClientKey" = '||_ClientKey||' and a."Lang" = '||quote_literal(_Lang)||'
+					group by a."GrievanceKey", a."ClientKey"
+				)
+				as rf on a."ClientKey" = rf."ClientKey" and a."GrievanceKey" = rf."GrievanceKey" 
+				left join 
+				(
+					select 
+					a."GrievanceKey", a."ClientKey",
+					json_agg(json_build_object(''ID'', a."ReferenceID",''Type'', a."ReferenceType" ,''data'',case when a."ReferenceType" = ''Individual'' then 
+					(row_to_json(r)::jsonb||jsonb_build_object(''Type'', ''Individual''))  else (row_to_json(u)::jsonb||jsonb_build_object(''Type'', ''Association''))  end)
+					)req
+					from  connecthub."RequestRequestorList" as a
+					left join hubviews.requestor_details_v1 as r on a."ClientKey" = r."ClientKey" and a."ReferenceID" = r."RequestorID" and a."ReferenceType" = ''Individual''
+--					left join hubviews."vw_unionInfo" as u on a."ClientKey" = u."ClientKey" and a."ReferenceID" = u."ID" and a."ReferenceType" = ''Association''
+					left join hubviews."fn_unionInfo"() as u on a."ClientKey" = u."ClientKey" and a."ReferenceID" = u."ID" and a."ReferenceType" = ''Association''
+					where "ReferenceRelation" = ''ReferedBy'' 
+					 and
+					'||case when _ID is null then quote_literal('1') else 'a."GrievanceKey"' end ||'='||quote_literal(coalesce(_ID,'1'))||'
+					and a."ClientKey" = '||_ClientKey||' and a."Lang" = '||quote_literal(_Lang)||'
+					group by a."GrievanceKey", a."ClientKey"
+				)
+				as rfb on a."ClientKey" = rfb."ClientKey" and a."GrievanceKey" = rfb."GrievanceKey" 
+				left join connecthub."UserInfo" as b on a."ClientKey" = b."ClientKey" and a."AssignedTo" = b."UserKey"
+--				left join hubviews.vw_party_incharges_publicdata v on v.booth = (rb.req->0->''data''->>''BoothID'')::text
+				where
+				'||case when _ID is null then quote_literal('1') else 'a."GrievanceKey"' end ||'='||quote_literal(coalesce(_ID,'1'))||'
+				and a."ClientKey" = '||_ClientKey||' and a."Lang" = '||quote_literal(_Lang)||'
+				) as a';
+		
+		raise notice '%', _query;
+		execute _query into _return,_Cnt;
+		_return = json_build_object('Status','Success', 'Details', json_build_object('List', _return, 'TotalRecords', _Cnt));
+	
+	end if;
+
+	return _return;
+	
+exception when others then 
+
+    get stacked diagnostics
+        _state   = returned_sqlstate,
+        _msg     = message_text,
+        _detail  = pg_exception_detail,
+        _hint    = pg_exception_hint,
+        _context = pg_exception_context;
+       
+            
+     insert into connecthub."EXCEPTION_LOG" ("procedure", "state","msg", "detail", "hint", "context")
+     values('ProcCrudRequestInformation', _state, _msg, _detail, _hint, _context);
+    
+     _return = json_build_object('Status','Failed','Details', json_build_object('State',_state, '_msg', _msg , '_detail', _detail, '_hint', _hint, '_context', _context));
+
+	return _return;
+END;
+$function$
+;
+
