@@ -21000,8 +21000,8 @@ begin
 		if ( select "GrievanceStatus" from connecthub."GrievanceInfo" where "GrievanceKey" = _ID AND "ClientKey" = _ClientKey AND "Lang" = _Lang) = 4 then 
 
 			_return = json_build_object('Status','Fail', 'Details', 'Re-Solved Grievances can''t be edited');
-
-		elsif not exists( select * from connecthub."GrievanceInfo" where "GrievanceKey" = _ID AND "ClientKey" = _ClientKey AND "Lang" = _Lang and "GrievanceStatus" = 7) then 
+	
+		elsif _grievancestatus = 7 and (select "GrievanceStatus" from connecthub."GrievanceInfo" where "GrievanceKey" = _ID AND "ClientKey" = _ClientKey AND "Lang" = _Lang ) <> 7 then
 
 			_return = json_build_object('Status','Fail', 'Details', 'Draft Grievance is already moved to Grievance');
 
@@ -21125,7 +21125,7 @@ begin
 			"PartyCadreStatus" = _partycadrestatus,
 			"PartyCadreDetails" = _partycadredetails,
 			"CreatedBy" = coalesce(_grievancemovedby,"CreatedBy"),
-			"CreatedUserName" = (SELECT "UserName" FROM connecthub."UserInfo" WHERE "UserKey" = _grievancemovedby AND "ClientKey" = _ClientKey)
+			"CreatedUserName" = coalesce((SELECT "UserName" FROM connecthub."UserInfo" WHERE "UserKey" = _grievancemovedby AND "ClientKey" = _ClientKey),"CreatedUserName")
 			WHERE "GrievanceKey" = _ID AND "ClientKey" = _ClientKey AND "Lang" = _Lang;
 	   	
 		
@@ -21454,3 +21454,1276 @@ END;
 $function$
 ;
 
+
+drop view hubviews.vw_voterdataset ;
+
+drop view connecthub."VotersInformation";
+
+drop view reporting.vw_party_cadre ;
+
+drop view hubviews."VotersInfo";
+
+-- hubviews.mv_pc_incharges_dataset source
+
+CREATE MATERIALIZED VIEW hubviews.mv_pc_incharges_dataset
+--TABLESPACE pg_default
+AS SELECT a."Ec_ClientKey" AS client_key,
+    split_part(b.cluster, '_'::text, 2)::integer AS cluster_key,
+    b.cluster,
+    split_part(b.unit, '_UNIT_'::text, 2)::integer AS unit_key,
+    b.unit,
+    a."Ec_VillageKey" AS village_key,
+    a."Ec_Village" AS village,
+    a.booth::integer AS booth_key,
+    a."Ec_PollingStation" AS booth,
+    b.name AS b_name,
+    b.gender AS b_gender,
+    b.age AS b_age,
+    b.contact AS b_contact,
+    b.voter_id AS b_voterid,
+    b.u_name,
+    b.u_gender,
+    b.u_age,
+    b.u_contact,
+    b.u_voterid,
+    b.c_name,
+    b.c_gender,
+    b.c_age,
+    b.c_contact,
+    b.c_voterid
+   FROM ( SELECT DISTINCT vie."Ec_ClientKey",
+            vie."Ec_Village",
+            vie."Ec_VillageKey",
+            split_part(vie."Ec_PollingStation", '-'::text, 1) AS booth,
+            vie."Ec_PollingStation"
+           FROM connecthub."VotersInfoEC" vie
+          WHERE vie."Ec_ClientKey" = 1) a
+     FULL JOIN ( SELECT b_1.ac_name,
+            b_1.cluster,
+            b_1.unit,
+            b_1.booth,
+            b_1.name,
+            b_1.gender,
+            b_1.age,
+            b_1.contact,
+            b_1.voter_id,
+            b_1.ps,
+            b_1.client_key,
+            c.name AS u_name,
+            c.gender AS u_gender,
+            c.age AS u_age,
+            c.contact AS u_contact,
+            c.voter_id AS u_voterid,
+            d.name AS c_name,
+            d.gender AS c_gender,
+            d.age AS c_age,
+            d.contact AS c_contact,
+            d.voter_id AS c_voterid
+           FROM ( SELECT ubmp.ac_name,
+                    ubmp.cluster,
+                    ubmp.unit,
+                    ubmp.booth,
+                    ubmp.name,
+                    ubmp.gender,
+                    ubmp.age,
+                    ubmp.contact,
+                    ubmp.voter_id,
+                    ubmp.ps,
+                    ubmp.client_key
+                   FROM ukd_booth_mapping_pc ubmp
+                  WHERE ubmp.ps = ''::text) b_1
+             LEFT JOIN ( SELECT ubmp.ac_name,
+                    ubmp.unit,
+                    ubmp.name,
+                    ubmp.gender,
+                    ubmp.age,
+                    ubmp.contact,
+                    ubmp.voter_id,
+                    ubmp.ps,
+                    ubmp.client_key
+                   FROM ukd_unit_mapping_pc ubmp
+                  WHERE ubmp.ps = ''::text) c ON c.client_key = b_1.client_key AND c.unit = b_1.unit
+             LEFT JOIN ( SELECT ubmp.ac_name,
+                    ubmp.cluster,
+                    ubmp.name,
+                    ubmp.gender,
+                    ubmp.age,
+                    ubmp.contact,
+                    ubmp.voter_id,
+                    ubmp.ps,
+                    ubmp.client_key
+                   FROM ukd_cluster_mapping_pc ubmp
+                  WHERE ubmp.ps = ''::text) d ON d.client_key = b_1.client_key AND d.cluster = b_1.cluster) b ON b.booth = a.booth
+WITH DATA;
+
+-- View indexes:
+CREATE INDEX mv_pc_incharges_dataset_clientkey_booth ON hubviews.mv_pc_incharges_dataset USING btree (client_key, booth_key, booth);
+
+
+CREATE OR REPLACE VIEW hubviews."VotersInfo"
+AS SELECT COALESCE(a."RequestorID", a."Ec_VoterId") AS "RequestorID",
+    COALESCE(a."ClientKey", a."Ec_ClientKey") AS "ClientKey",
+    COALESCE(a."Lang", a."Ec_Lang"::text) AS "Lang",
+    COALESCE(a."Photo", ''::text) AS "Photo",
+    COALESCE(a."RequestorType", 7) AS "RequestorType",
+    COALESCE(a."RequestorTypeName", 'Indvidual'::text) AS "RequestorTypeName",
+    COALESCE(a."RequestorFirstName", a."Ec_First_Name", ''::text) AS "RequestorFirstName",
+    COALESCE(a."RequestorLastName", a."Ec_Last_Name", ''::text) AS "RequestorLastName",
+    COALESCE(a."Age"::bigint, a."Ec_Age") AS "Age",
+    COALESCE(a."Gender", a."Ec_Gender", ''::text) AS "Gender",
+    COALESCE(a."Mobile", a."Ec_Mobile", ''::text) AS "Mobile",
+    COALESCE(a."AlternateMobile", ''::text) AS "AlternateMobile",
+    COALESCE(a."Email", ''::text) AS "Email",
+    COALESCE(a."Occupation", a."Ec_OccupationID") AS "Occupation",
+    COALESCE(a."Union", '{}'::integer[]) AS "Union",
+    COALESCE(a."UnionInfo", '[]'::json) AS "UnionInfo",
+    COALESCE(a."ConstituencyType", 'AC'::text) AS "ConstituencyType",
+    COALESCE(a."ConstituencyKey"::bigint, a."Ec_ACKey") AS "ConstituencyKey",
+    COALESCE(a."ConstituencyName", b."ACName"::text) AS "ConstituencyName",
+    COALESCE(a."MandalKey", a."Ec_MandalKey") AS "MandalKey",
+    COALESCE(a."Mandal", a."Ec_Mandal") AS "Mandal",
+    COALESCE(a."VillageKey", a."Ec_VillageKey") AS "VillageKey",
+    COALESCE(a."Village", a."Ec_Village") AS "Village",
+    COALESCE(a."Door/FlatNo", a."Ec_HouseNumber") AS "Door/FlatNo",
+    COALESCE(a."PinCode", ''::text) AS "PinCode",
+    COALESCE(a."AddressLine1", ''::text) AS "AddressLine1",
+    COALESCE(a."AddressLine2", ''::text) AS "AddressLine2",
+    COALESCE(a."VoterID", a."Ec_VoterId") AS "VoterID",
+    COALESCE(a."RelationType",
+        CASE
+            WHEN a."Ec_Relation" = 'father'::text AND COALESCE(a."Gender", a."Ec_Gender") = 'Male'::text THEN 'S/O'::text
+            WHEN a."Ec_Relation" = 'father'::text AND COALESCE(a."Gender", a."Ec_Gender") = 'Female'::text THEN 'D/O'::text
+            WHEN a."Ec_Relation" = 'husband'::text THEN 'W/O'::text
+            WHEN a."Ec_Relation" = 'mother'::text AND COALESCE(a."Gender", a."Ec_Gender") = 'Male'::text THEN 'S/O'::text
+            WHEN a."Ec_Relation" = 'mother'::text AND COALESCE(a."Gender", a."Ec_Gender") = 'FeMale'::text THEN 'D/O'::text
+            WHEN a."Ec_Relation" = 'others'::text AND COALESCE(a."Gender", a."Ec_Gender") = 'Male'::text THEN 'Others'::text
+            WHEN a."Ec_Relation" = 'daughter'::text AND COALESCE(a."Gender", a."Ec_Gender") = 'Male'::text THEN 'F/O'::text
+            WHEN a."Ec_Relation" = 'daughter'::text AND COALESCE(a."Gender", a."Ec_Gender") = 'FeMale'::text THEN 'M/O'::text
+            WHEN a."Ec_Relation" = 'wife'::text THEN 'H/O'::text
+            WHEN a."Ec_Relation" = 'son'::text AND COALESCE(a."Gender", a."Ec_Gender") = 'Male'::text THEN 'F/O'::text
+            WHEN a."Ec_Relation" = 'son'::text AND COALESCE(a."Gender", a."Ec_Gender") = 'FeMale'::text THEN 'M/O'::text
+            ELSE NULL::text
+        END) AS "RelationType",
+    COALESCE(a."RelationName", a."Ec_RelationName", ''::text) AS "RelationName",
+    COALESCE(a."RelationContact", ''::text) AS "RelationContact",
+    COALESCE(a."RelationAlternateContact", ''::text) AS "RelationAlternateContact",
+    COALESCE(a."Tags", '{0}'::text[]) AS "Tags",
+    COALESCE(a."AdditionalInfo", '[]'::json) AS "AdditionalInfo",
+    COALESCE(a."IsActive", true) AS "IsActive",
+    COALESCE(a."CreatedBy", ''::text) AS "CreatedBy",
+    COALESCE(a."CreatedUserName", ''::text) AS "CreatedUserName",
+    a."CreatedOn",
+    COALESCE(a."ModifiedBy", ''::text) AS "ModifiedBy",
+    COALESCE(a."ModifiedUserName", ''::text) AS "ModifiedUserName",
+    a."ModifiedOn",
+    COALESCE(a."IsReferedBy", ''::text) AS "IsReferedBy",
+    COALESCE(a."PGRSApplicantName", ''::text) AS "PGRSApplicantName",
+    COALESCE(a."QualityScore", 0::double precision) AS "QualityScore",
+    a."InvalidComments",
+    COALESCE(a.first_name_last_name_cleansed, ''::text) AS first_name_last_name_cleansed,
+    COALESCE(a.last_name_first_name_cleansed, ''::text) AS last_name_first_name_cleansed,
+        CASE
+            WHEN a."Caste" = ''::text THEN a."Ec_Caste"
+            ELSE a."Caste"
+        END AS "Caste",
+    a."Ec_PollingStation" AS ec_ps,
+    c.cluster_key,
+    c.cluster,
+    c.unit_key,
+    c.unit,
+    c.booth_key,
+    c.booth
+   FROM connecthub."VotersInfoEC" a
+     LEFT JOIN ( SELECT DISTINCT "PCACVillages"."ACKey",
+            "PCACVillages"."ACName",
+            "PCACVillages"."ClientKey",
+            "PCACVillages"."Lang"
+           FROM masters."PCACVillages") b ON a."Ec_ClientKey" = b."ClientKey" AND a."Ec_Lang" = b."Lang" AND a."Ec_ACKey" = b."ACKey"
+     LEFT JOIN hubviews.mv_pc_incharges_dataset c ON c.client_key = a."Ec_ClientKey" AND c.booth_key = split_part(a."Ec_PollingStation", '-'::text, 1)::integer AND c.booth = a."Ec_PollingStation";
+
+
+CREATE OR REPLACE VIEW connecthub."VotersInformation"
+AS WITH pcacmasters AS (
+         SELECT "PCACVillages"."ACKey",
+            "PCACVillages"."StateKey",
+            "PCACVillages"."State",
+            "PCACVillages"."DistrictKey",
+            "PCACVillages"."District",
+            "PCACVillages"."MandalKey",
+            "PCACVillages"."ACName",
+            "PCACVillages"."ClientKey",
+            "PCACVillages"."Lang",
+            row_number() OVER (PARTITION BY "PCACVillages"."ClientKey", "PCACVillages"."Lang", "PCACVillages"."MandalKey" ORDER BY "PCACVillages"."ACKey") AS rn
+           FROM masters."PCACVillages"
+        )
+ SELECT 'Not Verified'::text AS "VerificationStatus",
+    'Voter'::text AS "Source",
+    a."RequestorID",
+    a."ClientKey",
+    a."Lang",
+    a."Photo",
+    a."RequestorType",
+    a."RequestorTypeName",
+    a."RequestorFirstName",
+    a."RequestorLastName",
+    a."Age",
+    a."Gender",
+    a."Mobile",
+    a."AlternateMobile",
+    a."Email",
+    a."Occupation",
+    o."Occupation" AS "OccupationName",
+    a."Union",
+    a."UnionInfo",
+    a."ConstituencyType",
+    a."ConstituencyKey",
+    a."ConstituencyName",
+    b."StateKey",
+    b."State",
+    b."DistrictKey",
+    b."District",
+    a."MandalKey",
+    a."Mandal",
+    a."VillageKey",
+    a."Village",
+    a."Door/FlatNo",
+    a."PinCode",
+    a."AddressLine1",
+    a."AddressLine2",
+    a."VoterID",
+    a."RelationType",
+    a."RelationName",
+    a."RelationContact",
+    a."RelationAlternateContact",
+    a."Tags",
+    a."AdditionalInfo",
+    a."IsActive",
+    a."CreatedBy",
+    a."CreatedUserName",
+    a."CreatedOn",
+    a."ModifiedBy",
+    a."ModifiedUserName",
+    a."ModifiedOn",
+    a."QualityScore",
+    a."InvalidComments",
+    a."Caste",
+    a.ec_ps,
+    a.cluster_key,
+    a.cluster,
+    a.unit_key,
+    a.unit,
+    a.booth_key,
+    a.booth
+   FROM hubviews."VotersInfo" a
+     LEFT JOIN pcacmasters b ON a."ClientKey" = b."ClientKey" AND a."Lang" = b."Lang"::text AND a."MandalKey" = b."MandalKey" AND b.rn = 1
+     LEFT JOIN masters."OccupationList" o ON o."ClientKey" = a."ClientKey" AND o."Lang"::text = a."Lang" AND o."ID" = a."Occupation";
+
+CREATE OR REPLACE VIEW hubviews.vw_voterdataset
+AS SELECT "VoterID" AS id,
+    "ClientKey" AS client_key,
+    "Lang" AS lang,
+    COALESCE("Photo", 'NA'::text) AS photo,
+    "RequestorType" AS requestor_type,
+    "RequestorTypeName" AS requestor_type_name,
+    ("RequestorFirstName" || ' '::text) || COALESCE("RequestorLastName", ''::text) AS name,
+    'NA'::text AS registration_number,
+    COALESCE("Age", NULL::bigint) AS age,
+        CASE
+            WHEN "Age" < 18 THEN 'Minor'::text
+            WHEN "Age" >= 18 AND "Age" <= 25 THEN 'AgeGroup(18-25)'::text
+            WHEN "Age" >= 26 AND "Age" <= 30 THEN 'AgeGroup(26-30)'::text
+            WHEN "Age" >= 31 AND "Age" <= 35 THEN 'AgeGroup(31-35)'::text
+            WHEN "Age" >= 36 AND "Age" <= 40 THEN 'AgeGroup(36-40)'::text
+            WHEN "Age" >= 41 AND "Age" <= 45 THEN 'AgeGroup(41-45)'::text
+            WHEN "Age" >= 46 AND "Age" <= 50 THEN 'AgeGroup(46-50)'::text
+            WHEN "Age" >= 51 AND "Age" <= 55 THEN 'AgeGroup(51-55)'::text
+            WHEN "Age" >= 56 AND "Age" <= 60 THEN 'AgeGroup(56-60)'::text
+            WHEN "Age" >= 61 AND "Age" <= 65 THEN 'AgeGroup(61-65)'::text
+            WHEN "Age" >= 66 AND "Age" <= 70 THEN 'AgeGroup(66-70)'::text
+            WHEN "Age" >= 71 AND "Age" <= 75 THEN 'AgeGroup(71-75)'::text
+            WHEN "Age" > 75 THEN 'AgeGroup(>75)'::text
+            ELSE 'NA'::text
+        END AS age_group,
+    COALESCE("Gender", 'NA'::text) AS gender,
+    COALESCE("Mobile", 'NA'::text) AS requestor_contact,
+    COALESCE("AlternateMobile", 'NA'::text) AS requestor_alternate_contact,
+    string_to_array(concat("Mobile",
+        CASE
+            WHEN "AlternateMobile" = ''::text THEN NULL::text
+            ELSE ','::text || "AlternateMobile"
+        END), ','::text) AS mobile,
+    COALESCE("Email", 'NA'::text) AS email,
+    COALESCE("Occupation", 0) AS occupation_id,
+    COALESCE("OccupationName", 'NA'::text::character varying) AS occupation,
+    COALESCE("ConstituencyType", 'NA'::text) AS constituency_type,
+    COALESCE("ConstituencyKey", 0::bigint) AS constituency_key,
+    COALESCE("ConstituencyName", 'NA'::character varying::text) AS constituency_name,
+    "StateKey" AS state_key,
+    "State" AS state,
+    COALESCE("DistrictKey", 0) AS district_key,
+    COALESCE("District", 'NA'::text) AS district,
+    COALESCE("MandalKey", 0) AS mandal_key,
+    COALESCE("Mandal", 'NA'::text) AS mandal,
+    COALESCE("VillageKey", 0) AS village_key,
+    COALESCE("Village", 'NA'::text) AS village,
+    COALESCE("Door/FlatNo", 'NA'::text) AS door_flat_no,
+    COALESCE("PinCode", 'NA'::text) AS pin_code,
+    COALESCE("AddressLine1", 'NA'::text) AS address_line1,
+    COALESCE("AddressLine2", 'NA'::text) AS address_line2,
+    COALESCE("VoterID", 'NA'::text) AS voter_id,
+    COALESCE("RelationType", 'NA'::text) AS relation_type,
+    COALESCE("RelationName", 'NA'::text) AS relation_name,
+    COALESCE("RelationContact", 'NA'::text) AS relation_contact,
+    COALESCE("RelationAlternateContact", 'NA'::text) AS relation_alternate_contact,
+    "Tags" AS tags,
+    '[]'::json AS requestor_grievance_info,
+    '{}'::text[] AS requestor_grievances,
+    '{}'::text[] AS requestor_reference_type,
+    '{}'::text[] AS requestor_reference_relation,
+    COALESCE("AdditionalInfo", '[]'::json) AS additional_info,
+    '[]'::json AS members,
+    "IsActive" AS is_active,
+    COALESCE("CreatedBy", 'NA'::text) AS created_by,
+    COALESCE("CreatedUserName", 'NA'::text) AS created_user_name,
+    "CreatedOn" AS created_on,
+    "ModifiedOn" AS modified_on,
+    'NA'::text AS created_on_month,
+    'NA'::text AS created_on_year,
+    'NA'::text AS created_on_month_year,
+    "QualityScore"::integer AS qualityscore,
+    "InvalidComments" AS invalidcomments,
+    "Caste" AS caste,
+    ec_ps,
+    cluster_key,
+    cluster,
+    unit_key,
+    unit,
+    booth_key,
+    booth
+   FROM connecthub."VotersInformation";
+     
+-- reporting.vw_party_cadre source
+
+CREATE OR REPLACE VIEW reporting.vw_party_cadre
+AS SELECT COALESCE(a.voter_id, 'NA'::text) AS voter_id,
+    a.clientkey,
+    a.requestor_type_name,
+    a.name,
+    a.gender,
+    a.mobile,
+    a.email,
+    a.occupation,
+    a.constituency_name,
+    a.mandal,
+    a.village,
+    a.is_registered_as_voter,
+    COALESCE(b."Tags", c."Tags") AS tags,
+    a.grievances,
+        CASE
+            WHEN a.grievances = 'None'::text THEN 'InActive'::text
+            ELSE 'Active'::text
+        END AS user_active,
+    a.caste,
+    a.party_name,
+    a.ec_ps,
+    row_number() OVER (PARTITION BY a.voter_id) AS voter_unq_id
+   FROM ( SELECT q.voter_id,
+            q.clientkey,
+            q.requestor_type_name,
+            q.name,
+            q.gender,
+            q.mobile,
+            q.email,
+            q.occupation,
+            q.constituency_name,
+            q.mandal,
+            q.village,
+            q.is_registered_as_voter,
+            unnest(q.tags) AS tags,
+            COALESCE(q.req_grievances, q.vot_grievances) AS grievances,
+            q.caste,
+            q.party_name,
+            q.ec_ps
+           FROM ( SELECT a_1.voter_id,
+                    COALESCE(b_1.client_key, a_1."ClientKey") AS clientkey,
+                    COALESCE(b_1.requestor_type_name, a_1."RequestorTypeName"::character varying) AS requestor_type_name,
+                    COALESCE(b_1.name, a_1."Name"::character varying) AS name,
+                    COALESCE(b_1.gender, a_1."Gender"::character varying) AS gender,
+                    COALESCE(b_1.requestor_contact, a_1."Mobile"::character varying) AS mobile,
+                    COALESCE(b_1.email, 'NA'::character varying) AS email,
+                    COALESCE(b_1.occupation, 'None'::character varying) AS occupation,
+                    COALESCE(b_1.constituency_name, a_1."ConstituencyName"::character varying) AS constituency_name,
+                    COALESCE(b_1.mandal, a_1."Mandal") AS mandal,
+                    COALESCE(b_1.village, a_1."Village") AS village,
+                    COALESCE(b_1.is_registered_as_voter, 'Registered'::text) AS is_registered_as_voter,
+                    COALESCE(a_1."Tags", '{6}'::text[]) AS tags,
+                    unnest(b_1.requestor_grievances) AS req_grievances,
+                    unnest(a_1.vot_grievances) AS vot_grievances,
+                    COALESCE(b_1.caste, 'None'::character varying) AS caste,
+                    COALESCE(b_1.partyname, 'None'::character varying) AS party_name,
+                    COALESCE(a_1.ec_ps, 'None'::text) AS ec_ps
+                   FROM ( SELECT "VotersInfo"."RequestorID" AS voter_id,
+                            "VotersInfo"."ClientKey",
+                            "VotersInfo"."RequestorType",
+                            "VotersInfo"."RequestorTypeName",
+                            concat("VotersInfo"."RequestorFirstName", "VotersInfo"."RequestorLastName") AS "Name",
+                            "VotersInfo"."Age",
+                            "VotersInfo"."Gender",
+                            "VotersInfo"."Mobile",
+                            "VotersInfo"."ConstituencyName",
+                            "VotersInfo"."Mandal",
+                            "VotersInfo"."Village",
+                            "VotersInfo"."Tags",
+                            '{None}'::text[] AS vot_grievances,
+                            "VotersInfo".ec_ps
+                           FROM hubviews."VotersInfo"
+                          WHERE ('6'::text = ANY ("VotersInfo"."Tags")) AND "VotersInfo"."ClientKey" = 1) a_1
+                     FULL JOIN ( SELECT vw_requestordataset.id,
+                            vw_requestordataset.client_key,
+                            vw_requestordataset.lang,
+                            vw_requestordataset.photo,
+                            vw_requestordataset.requestor_type,
+                            vw_requestordataset.requestor_type_name,
+                            vw_requestordataset.name,
+                            vw_requestordataset.registration_number,
+                            vw_requestordataset.age,
+                            vw_requestordataset.age_group,
+                            vw_requestordataset.gender,
+                            vw_requestordataset.requestor_contact,
+                            vw_requestordataset.requestor_alternate_contact,
+                            vw_requestordataset.mobile,
+                            vw_requestordataset.email,
+                            vw_requestordataset.occupation_id,
+                            vw_requestordataset.occupation,
+                            vw_requestordataset.constituency_type,
+                            vw_requestordataset.constituency_key,
+                            vw_requestordataset.constituency_name,
+                            vw_requestordataset.state_key,
+                            vw_requestordataset.state,
+                            vw_requestordataset.district_key,
+                            vw_requestordataset.district,
+                            vw_requestordataset.mandal_key,
+                            vw_requestordataset.mandal,
+                            vw_requestordataset.village_key,
+                            vw_requestordataset.village,
+                            vw_requestordataset.door_flat_no,
+                            vw_requestordataset.pin_code,
+                            vw_requestordataset.address_line1,
+                            vw_requestordataset.address_line2,
+                            vw_requestordataset.voter_id,
+                            vw_requestordataset.is_registered_as_voter,
+                            vw_requestordataset.relation_type,
+                            vw_requestordataset.relation_name,
+                            vw_requestordataset.relation_contact,
+                            vw_requestordataset.relation_alternate_contact,
+                            vw_requestordataset.tags,
+                            vw_requestordataset.requestor_grievance_info,
+                            vw_requestordataset.requestor_grievances,
+                            vw_requestordataset.requestor_reference_type,
+                            vw_requestordataset.requestor_reference_relation,
+                            vw_requestordataset.additional_info,
+                            vw_requestordataset.members,
+                            vw_requestordataset.is_active,
+                            vw_requestordataset.created_by,
+                            vw_requestordataset.created_user_name,
+                            vw_requestordataset.created_on,
+                            vw_requestordataset.created_on_month,
+                            vw_requestordataset.created_on_year,
+                            vw_requestordataset.created_on_month_year,
+                            vw_requestordataset.caste,
+                            vw_requestordataset.additional_info_json,
+                            vw_requestordataset.partyname
+                           FROM hubviews.vw_requestordataset
+                          WHERE ('Party Cadre'::text = ANY (vw_requestordataset.tags)) AND vw_requestordataset.client_key = 1) b_1 ON a_1.voter_id = b_1.voter_id::text AND a_1."ClientKey" = COALESCE(b_1.client_key, 1)) q) a
+     LEFT JOIN ( SELECT "TagList"."ID",
+            "TagList"."TagType",
+            "TagList"."Tags",
+            "TagList"."IsActive",
+            "TagList"."ClientKey",
+            "TagList"."Lang",
+            "TagList"."ReportingCategory"
+           FROM masters."TagList"
+          WHERE "TagList"."TagType"::text = 'RequestorType'::text AND "TagList"."ClientKey" = 1) b ON a.tags::integer = b."ID" AND a.requestor_type_name::text = 'Individual'::text
+     LEFT JOIN ( SELECT "TagList"."ID",
+            "TagList"."TagType",
+            "TagList"."Tags",
+            "TagList"."IsActive",
+            "TagList"."ClientKey",
+            "TagList"."Lang",
+            "TagList"."ReportingCategory"
+           FROM masters."TagList"
+          WHERE "TagList"."TagType"::text = 'AssociationType'::text AND "TagList"."ClientKey" = 1) c ON a.tags::integer = c."ID" AND a.requestor_type_name::text = 'Association'::text;
+         
+         
+         
+DROP FUNCTION hubviews.fn_voterdataset();
+
+CREATE OR REPLACE FUNCTION hubviews.fn_voterdataset()
+ RETURNS TABLE(id text, client_key integer, lang text, photo text, requestor_type integer, requestor_type_name text, name text, registration_number text, age bigint, age_group text, gender text, requestor_contact text, requestor_alternate_contact text, mobile text[], email text, occupation_id integer, occupation character varying, constituency_type text, constituency_key bigint, constituency_name text, state_key integer, state text, district_key integer, district text, mandal_key integer, mandal text, village_key integer, village text, door_flat_no text, pin_code text, address_line1 text, address_line2 text, voter_id text, relation_type text, relation_name text, relation_contact text, relation_alternate_contact text, tags text[], requestor_grievance_info json, requestor_grievances text[], requestor_reference_type text[], requestor_reference_relation text[], additional_info json, members json, is_active boolean, created_by text, created_user_name text, created_on timestamp without time zone, modified_on timestamp without time zone, created_on_month text, created_on_year text, created_on_month_year text, qualityscore integer, invalidcomments text, caste text, cluster_key integer, cluster text, unit_key integer, unit text, booth_key integer, booth text)
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        "VoterID" AS id,
+        "ClientKey" AS client_key,
+        "Lang" AS lang,
+        COALESCE("Photo", 'NA'::text) AS photo,
+        "RequestorType" AS requestor_type,
+        "RequestorTypeName" AS requestor_type_name,
+        ("RequestorFirstName" || ' ' || COALESCE("RequestorLastName", '')) AS name,
+        'NA'::text AS registration_number,
+        COALESCE("Age", NULL::bigint) AS age,
+        CASE
+            WHEN "Age" < 18 THEN 'Minor'
+            WHEN "Age" BETWEEN 18 AND 25 THEN 'AgeGroup(18-25)'
+            WHEN "Age" BETWEEN 26 AND 30 THEN 'AgeGroup(26-30)'
+            WHEN "Age" BETWEEN 31 AND 35 THEN 'AgeGroup(31-35)'
+            WHEN "Age" BETWEEN 36 AND 40 THEN 'AgeGroup(36-40)'
+            WHEN "Age" BETWEEN 41 AND 45 THEN 'AgeGroup(41-45)'
+            WHEN "Age" BETWEEN 46 AND 50 THEN 'AgeGroup(46-50)'
+            WHEN "Age" BETWEEN 51 AND 55 THEN 'AgeGroup(51-55)'
+            WHEN "Age" BETWEEN 56 AND 60 THEN 'AgeGroup(56-60)'
+            WHEN "Age" BETWEEN 61 AND 65 THEN 'AgeGroup(61-65)'
+            WHEN "Age" BETWEEN 66 AND 70 THEN 'AgeGroup(66-70)'
+            WHEN "Age" BETWEEN 71 AND 75 THEN 'AgeGroup(71-75)'
+            WHEN "Age" > 75 THEN 'AgeGroup(>75)'
+            ELSE 'NA'
+        END AS age_group,
+        COALESCE("Gender", 'NA') AS gender,
+        COALESCE("Mobile", 'NA') AS requestor_contact,
+        COALESCE("AlternateMobile", 'NA') AS requestor_alternate_contact,
+        string_to_array(concat("Mobile",
+            CASE
+                WHEN "AlternateMobile" = '' THEN NULL
+                ELSE ',' || "AlternateMobile"
+            END), ',') AS mobile,
+        COALESCE("Email", 'NA') AS email,
+        COALESCE("Occupation", 0) AS occupation_id,
+        COALESCE("OccupationName", 'NA') AS occupation,
+        COALESCE("ConstituencyType", 'NA') AS constituency_type,
+        COALESCE("ConstituencyKey", 0::bigint) AS constituency_key,
+        COALESCE("ConstituencyName", 'NA') AS constituency_name,
+        "StateKey" AS state_key,
+        "State" AS state,
+        COALESCE("DistrictKey", 0) AS district_key,
+        COALESCE("District", 'NA') AS district,
+        COALESCE("MandalKey", 0) AS mandal_key,
+        COALESCE("Mandal", 'NA') AS mandal,
+        COALESCE("VillageKey", 0) AS village_key,
+        COALESCE("Village", 'NA') AS village,
+        COALESCE("Door/FlatNo", 'NA') AS door_flat_no,
+        COALESCE("PinCode", 'NA') AS pin_code,
+        COALESCE("AddressLine1", 'NA') AS address_line1,
+        COALESCE("AddressLine2", 'NA') AS address_line2,
+        COALESCE("VoterID", 'NA') AS voter_id,
+        COALESCE("RelationType", 'NA') AS relation_type,
+        COALESCE("RelationName", 'NA') AS relation_name,
+        COALESCE("RelationContact", 'NA') AS relation_contact,
+        COALESCE("RelationAlternateContact", 'NA') AS relation_alternate_contact,
+        "Tags" AS tags,
+        '[]'::json AS requestor_grievance_info,
+        '{}'::text[] AS requestor_grievances,
+        '{}'::text[] AS requestor_reference_type,
+        '{}'::text[] AS requestor_reference_relation,
+        COALESCE("AdditionalInfo", '[]'::json) AS additional_info,
+        '[]'::json AS members,
+        "IsActive" AS is_active,
+        COALESCE("CreatedBy", 'NA') AS created_by,
+        COALESCE("CreatedUserName", 'NA') AS created_user_name,
+        "CreatedOn" AS created_on,
+        "ModifiedOn" AS modified_on,
+        'NA' AS created_on_month,
+        'NA' AS created_on_year,
+        'NA' AS created_on_month_year,
+        "QualityScore"::integer AS qualityscore,
+        "InvalidComments" AS invalidcomments,
+        "Caste" AS caste,
+        "VotersInformation"."cluster_key" AS cluster_key,
+        "VotersInformation"."cluster" AS cluster,
+        "VotersInformation"."unit_key" AS unit_key,
+        "VotersInformation"."unit" AS unit,
+        "VotersInformation"."booth_key" AS booth_key,
+        "VotersInformation"."booth" AS booth
+    FROM connecthub."VotersInformation";
+END;
+$function$
+;
+
+
+DROP FUNCTION hubviews.fn_votersinfo();
+
+CREATE OR REPLACE FUNCTION hubviews.fn_votersinfo()
+ RETURNS TABLE(requestorid text, clientkey integer, lang text, photo text, requestortype integer, requestortypename text, requestorfirstname text, requestorlastname text, age bigint, gender text, mobile text, alternatemobile text, email text, occupation integer, "Union" integer[], unioninfo json, constituencytype text, constituencykey bigint, constituencyname text, mandalkey integer, mandal text, villagekey integer, village text, "Door/FlatNo" text, pincode text, addressline1 text, addressline2 text, voterid text, relationtype text, relationname text, relationcontact text, relationalternatecontact text, tags text[], additionalinfo json, isactive boolean, createdby text, createdusername text, createdon timestamp without time zone, modifiedby text, modifiedusername text, modifiedon timestamp without time zone, isreferedby text, pgrsapplicantname text, qualityscore double precision, invalidcomments text, first_name_last_name_cleansed text, last_name_first_name_cleansed text, caste text, cluster_key integer, cluster text, unit_key integer, unit text, booth_key integer, booth text)
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        COALESCE(a."RequestorID", a."Ec_VoterId") AS "RequestorID",
+        COALESCE(a."ClientKey", a."Ec_ClientKey") AS "ClientKey",
+        COALESCE(a."Lang", a."Ec_Lang"::text) AS "Lang",
+        COALESCE(a."Photo", ''::text) AS "Photo",
+        COALESCE(a."RequestorType", 7) AS "RequestorType",
+        COALESCE(a."RequestorTypeName", 'Indvidual'::text) AS "RequestorTypeName",
+        COALESCE(a."RequestorFirstName", a."Ec_First_Name", ''::text) AS "RequestorFirstName",
+        COALESCE(a."RequestorLastName", a."Ec_Last_Name", ''::text) AS "RequestorLastName",
+        COALESCE(a."Age"::bigint, a."Ec_Age") AS "Age",
+        COALESCE(a."Gender", a."Ec_Gender", ''::text) AS "Gender",
+        COALESCE(a."Mobile", a."Ec_Mobile", ''::text) AS "Mobile",
+        COALESCE(a."AlternateMobile", ''::text) AS "AlternateMobile",
+        COALESCE(a."Email", ''::text) AS "Email",
+        COALESCE(a."Occupation", a."Ec_OccupationID") AS "Occupation",
+        COALESCE(a."Union", '{}'::integer[]) AS "Union",
+        COALESCE(a."UnionInfo", '[]'::json) AS "UnionInfo",
+        COALESCE(a."ConstituencyType", 'AC'::text) AS "ConstituencyType",
+        COALESCE(a."ConstituencyKey"::bigint, a."Ec_ACKey") AS "ConstituencyKey",
+        COALESCE(a."ConstituencyName", b."ACName"::text) AS "ConstituencyName",
+        COALESCE(a."MandalKey", a."Ec_MandalKey") AS "MandalKey",
+        COALESCE(a."Mandal", a."Ec_Mandal") AS "Mandal",
+        COALESCE(a."VillageKey", a."Ec_VillageKey") AS "VillageKey",
+        COALESCE(a."Village", a."Ec_Village") AS "Village",
+        COALESCE(a."Door/FlatNo", a."Ec_HouseNumber") AS "Door/FlatNo",
+        COALESCE(a."PinCode", ''::text) AS "PinCode",
+        COALESCE(a."AddressLine1", ''::text) AS "AddressLine1",
+        COALESCE(a."AddressLine2", ''::text) AS "AddressLine2",
+        COALESCE(a."VoterID", a."Ec_VoterId") AS "VoterID",
+        COALESCE(a."RelationType",
+            CASE
+                WHEN a."Ec_Relation" = 'father' AND COALESCE(a."Gender", a."Ec_Gender") = 'Male' THEN 'S/O'
+                WHEN a."Ec_Relation" = 'father' AND COALESCE(a."Gender", a."Ec_Gender") = 'Female' THEN 'D/O'
+                WHEN a."Ec_Relation" = 'husband' THEN 'W/O'
+                ELSE NULL
+            END) AS "RelationType",
+        COALESCE(a."RelationName", a."Ec_RelationName", ''::text) AS "RelationName",
+        COALESCE(a."RelationContact", ''::text) AS "RelationContact",
+        COALESCE(a."RelationAlternateContact", ''::text) AS "RelationAlternateContact",
+        COALESCE(a."Tags", '{0}'::text[]) AS "Tags",
+        COALESCE(a."AdditionalInfo", '[]'::json) AS "AdditionalInfo",
+        COALESCE(a."IsActive", true) AS "IsActive",
+        COALESCE(a."CreatedBy", ''::text) AS "CreatedBy",
+        COALESCE(a."CreatedUserName", ''::text) AS "CreatedUserName",
+        a."CreatedOn",
+        COALESCE(a."ModifiedBy", ''::text) AS "ModifiedBy",
+        COALESCE(a."ModifiedUserName", ''::text) AS "ModifiedUserName",
+        a."ModifiedOn",
+        COALESCE(a."IsReferedBy", ''::text) AS "IsReferedBy",
+        COALESCE(a."PGRSApplicantName", ''::text) AS "PGRSApplicantName",
+        COALESCE(a."QualityScore", 0::double precision) AS "QualityScore",
+        a."InvalidComments",
+        COALESCE(a.first_name_last_name_cleansed, ''::text) AS first_name_last_name_cleansed,
+        COALESCE(a.last_name_first_name_cleansed, ''::text) AS last_name_first_name_cleansed,
+        a."Caste",
+        c.cluster_key,
+        c.cluster,
+        c.unit_key,
+        c.unit,
+        c.booth_key,
+        c.booth
+    FROM connecthub."VotersInfoEC" a
+    LEFT JOIN (
+        SELECT DISTINCT 
+            "PCACVillages"."ACKey",
+            "PCACVillages"."ACName",
+            "PCACVillages"."ClientKey",
+            "PCACVillages"."Lang"
+        FROM masters."PCACVillages"
+    ) b ON a."Ec_ClientKey" = b."ClientKey" AND a."Ec_Lang" = b."Lang" AND a."Ec_ACKey" = b."ACKey"
+    LEFT JOIN hubviews.mv_pc_incharges_dataset c 
+        ON c.client_key = a."Ec_ClientKey" 
+        AND c.booth_key = split_part(a."Ec_PollingStation", '-'::text, 1)::integer 
+        AND c.booth = a."Ec_PollingStation";
+END;
+$function$
+;
+
+
+DROP FUNCTION connecthub."_7_dataset_get_sql"(jsonb);
+
+CREATE OR REPLACE FUNCTION connecthub._7_dataset_get_sql(input jsonb)
+ RETURNS text
+ LANGUAGE plpgsql
+AS $function$
+declare
+_location_keys text;
+_area_uom text;
+_area_uom_text text;
+_location_granularity text;
+_location_join text;
+_number_of_decimals text;
+_select_columns text;
+_where_clause text := ' ';
+_having_clause text := ' ';
+_sortby_clause text := ' ';
+_limit integer;
+_offset integer;
+_limit_string text;
+_offset_string text;
+_final_select text:='*';
+_overallresultrows integer;
+_subresultrows integer;
+_final_groupby text:='';
+sql_query text;
+_final_numeric_variables text := '';
+_search_clause text := ' ';
+_finalwhereclause text='';
+_UserID text;
+_clientkey int;
+_profilekey int;
+_role_condition text;
+begin
+
+--_location_keys := input->'variables'->'location_keys'->>'value';
+--_select_columns := input->'variables'->'location_keys'->>'value';
+--_area_uom := input->'variables'->'area_uom'->>'value';
+--_area_uom_text := input->'variables'->'area_uom_value'->>'value';
+--_location_granularity := input->'variables'->'location_granularity'->>'value';
+--_location_join := input->'variables'->'location_join'->>'value';
+--_number_of_decimals := (input->'variables'->'number_of_decimals'->>'value')::text;
+_select_columns := replace(replace((input->>'_select_array_jsonb'),'[',''),']','');
+_where_clause := (input->>'_where_clause');
+_UserID := (input->>'UserID');
+_clientkey := (input->>'ClientKey')::int;
+--_search_clause := (input->>'_search_clause');
+--_having_clause := (input->>'_having_clause');
+_sortby_clause := (input->>'_sortby_clause');
+_limit := (input->>'limit')::integer;
+_offset := (input->>'offset')::integer;
+--_overallresultrows:= (input->'gridoptions'->>'overallresultrows')::integer;
+--_subresultrows:= (input->'gridoptions'->>'subresultrows')::integer;
+
+--if _overallresultrows = 1 or _subresultrows = 1 then 
+--	select fn_data_explorer_grouping_rollup 
+--	into _final_select
+--	from reporting.fn_data_explorer_grouping_rollup((input->>'_select_array_jsonb')::jsonb);
+--	
+--	select fn_data_explorer_groupby_rollup
+--	into _final_groupby
+--	from reporting.fn_data_explorer_groupby_rollup((input->>'_select_array_jsonb')::jsonb);
+--
+--end if;
+
+_finalwhereclause =' ';
+
+if _offset >= 0 then
+
+	_limit_string := ' limit '|| _limit::text;
+	_offset_string := ' offset '|| _offset::text;
+
+else
+
+	_limit_string := '';
+	_offset_string := '';
+
+end if;
+
+if trim(_where_clause) <> '' then
+	_where_clause := ' where ' || _where_clause;
+end if;
+
+--if trim(_search_clause) <> '' and trim(_where_clause) <> '' then
+--	_where_clause := _where_clause || ' and ' || _search_clause;
+--elsif trim(_search_clause) <> '' and trim(_where_clause) = '' then
+--	_where_clause := ' where ' || _search_clause;
+--elsif trim(_search_clause) = '' and trim(_where_clause) <> '' then
+--	_where_clause := _where_clause;
+--else
+--      _where_clause := _where_clause;
+--end if;
+
+--if trim(_having_clause) <> '' then
+--	_having_clause := ' where ' || _having_clause;
+--end if;
+
+
+if trim(_sortby_clause) <> '' then
+	_sortby_clause := ' order by ' || _sortby_clause;
+end if;
+
+select "ProfileKey" into _profilekey from connecthub."UserProfiles" where  "UserKey" = _UserID;
+
+if _profilekey = 1 then 
+	_role_condition = '"client_key" = '||_clientkey;
+elsif _profilekey = 2 then 
+	_role_condition = '"client_key" = '||_clientkey;
+elsif _profilekey = 3 then
+	_role_condition = '"client_key" = '||_clientkey;
+elsif _profilekey = 4 then
+	_role_condition = '"client_key" = '||_clientkey;
+elsif _profilekey = 5 then
+	_role_condition = '"client_key" = '||_clientkey;
+else 
+	_role_condition = '"client_key" = '||_clientkey;
+end if;
+
+raise notice 'select %, where %, having %', _select_columns, _where_clause, _having_clause;
+
+sql_query = 
+'SELECT json_agg(row_to_json(t)) FROM ( select '||_select_columns||' from (
+with base_data as (
+select '||_select_columns||'
+--from hubviews."vw_voterdataset"  
+from hubviews."fn_voterdataset"()  
+'||_where_clause||
+case when _where_clause is null or _where_clause= '' then ' where '||_role_condition  
+	when _where_clause is not null or _where_clause <> '' then ' and '||_role_condition else '' end 
+	||' )
+select * from base_data order by modified_on desc nulls last, "id"
+) subquery ' ||_sortby_clause || _limit_string::text ||  _offset_string::text ||') t';
+
+
+raise notice '%', 'Begin of Final Sql Query';
+raise notice '%', '------------------------';
+raise notice '%', sql_query;
+raise notice '%', '------------------------';
+raise notice '%', 'End of Final Sql Query';
+
+return sql_query;
+
+END;
+$function$
+;
+
+
+DROP FUNCTION connecthub."_7_dataset_get_sql_count"(jsonb);
+
+CREATE OR REPLACE FUNCTION connecthub._7_dataset_get_sql_count(input jsonb)
+ RETURNS text
+ LANGUAGE plpgsql
+AS $function$
+declare
+_location_keys text;
+_area_uom text;
+_area_uom_text text;
+_location_granularity text;
+_location_join text;
+_number_of_decimals text;
+_select_columns text;
+_where_clause text := ' ';
+_having_clause text := ' ';
+_limit text;
+_offset text;
+_search_clause text := ' ';
+_UserID text;
+_clientkey int;
+_profilekey int;
+_role_condition text;
+sql_query text;
+
+begin
+
+--_location_keys := input->'variables'->'location_keys'->>'value';
+--_select_columns := input->'variables'->'location_keys'->>'value';
+--_area_uom := input->'variables'->'area_uom'->>'value';
+--_area_uom_text := input->'variables'->'area_uom_value'->>'value';
+--_location_granularity := input->'variables'->'location_granularity'->>'value';
+--_location_join := input->'variables'->'location_join'->>'value';
+--_number_of_decimals := (input->'variables'->'number_of_decimals'->>'value')::text;
+_select_columns := replace(replace((input->>'_select_array_jsonb'),'[',''),']','');
+_where_clause := (input->>'_where_clause');
+_UserID := (input->>'UserID');
+_clientkey := (input->>'ClientKey')::int;
+--_search_clause := (input->>'_search_clause');
+--_having_clause := (input->>'_having_clause');
+_limit := (input->>'limit');
+_offset := (input->>'offset');
+
+
+if trim(_where_clause) <> '' then
+	_where_clause := ' where ' || _where_clause;
+end if;
+
+--if trim(_search_clause) <> '' and trim(_where_clause) <> '' then
+--	_where_clause := _where_clause || ' and ' || _search_clause;
+--elsif trim(_search_clause) <> '' and trim(_where_clause) = '' then
+--	_where_clause := ' where ' || _search_clause;
+--elsif trim(_search_clause) = '' and trim(_where_clause) <> '' then
+--	_where_clause := _where_clause;
+--else
+--      _where_clause := _where_clause;
+--end if;
+
+--if trim(_having_clause) <> '' then
+--	_having_clause := ' where ' || _having_clause;
+--end if;
+
+select "ProfileKey" into _profilekey from connecthub."UserProfiles" where  "UserKey" = _UserID;
+
+if _profilekey = 1 then 
+	_role_condition = '"client_key" = '||_clientkey;
+elsif _profilekey = 2 then 
+	_role_condition = '"client_key" = '||_clientkey;
+elsif _profilekey = 3 then
+	_role_condition = '"client_key" = '||_clientkey;
+elsif _profilekey = 4 then
+	_role_condition = '"client_key" = '||_clientkey;
+elsif _profilekey = 5 then
+	_role_condition = '"client_key" = '||_clientkey;
+else 
+	_role_condition = '"client_key" = '||_clientkey;
+end if;
+
+raise notice 'select %, where %', _select_columns, _where_clause;
+
+sql_query = 
+'select count(*) from (
+with base_data as (
+select '||_select_columns||'
+--from hubviews."vw_voterdataset" 
+from hubviews."fn_voterdataset"()  
+'||_where_clause||
+case when _where_clause is null or _where_clause= '' then ' where '||_role_condition  
+	when _where_clause is not null or _where_clause <> '' then ' and '||_role_condition else '' end 
+	||' )
+select * from base_data
+) subquery ';
+
+return sql_query;
+END;
+$function$
+;
+         
+SELECT dblink_connect('my_connection', 'host=65.0.5.232 dbname=connecthubv2 user=postgres password=pdoCc7M2');
+
+--select * 
+UPDATE connecthub."VotersInfoEC" b
+SET "Ec_PollingStation" = a."Ec_PollingStation"
+FROM (
+    SELECT a."Ec_VoterId", a."Ec_PollingStation"
+    FROM dblink('my_connection', 'SELECT "Ec_VoterId", "Ec_PollingStation" FROM connecthub."VotersInfoEC"')
+    AS a("Ec_VoterId" text, "Ec_PollingStation" text)
+    WHERE a."Ec_VoterId" IN (select "Ec_VoterId" from (
+SELECT DISTINCT vie."Ec_ClientKey",
+            vie."Ec_Village",
+            vie."Ec_VillageKey",
+            split_part(vie."Ec_PollingStation", '-'::text, 1) AS booth,
+            vie."Ec_PollingStation", 
+            vie."Ec_VoterId" 
+           FROM connecthub."VotersInfoEC" vie
+) a where booth = "Ec_PollingStation" and "Ec_VoterId" is not null)
+) a
+WHERE b."Ec_VoterId" = a."Ec_VoterId";
+
+
+UPDATE connecthub."VotersInfoEC" b
+SET "Ec_PollingStation" = a."Ec_PollingStation"
+FROM (
+    SELECT a."Ec_VoterId", a."Ec_PollingStation", "Ec_Name"
+    FROM dblink('my_connection', 'SELECT "Ec_VoterId", "Ec_PollingStation","Ec_Name" FROM connecthub."VotersInfoEC" where "Ec_Name" = ''MOHAN BABU CHALLA''')
+    AS a("Ec_VoterId" text, "Ec_PollingStation" text, "Ec_Name" text)
+    WHERE "Ec_Name" = 'MOHAN BABU CHALLA'
+) a
+WHERE b."Ec_Name" = a."Ec_Name";
+
+CREATE INDEX votersinfoec_ec_clientkey_clientkey_idx ON connecthub."VotersInfoEC" USING btree ("Ec_ClientKey");
+CREATE INDEX votersinfoec_ec_pollingstation_clientkey_idx ON connecthub."VotersInfoEC" USING btree ("Ec_ClientKey", "Ec_PollingStation");
+
+update connecthub."VotersInfoEC" 
+set "Ec_VillageKey" = 196700
+where "Ec_ACKey" = 3186 and "Ec_MandalKey" =5316 and "Ec_VillageKey" = 596759;
+
+update connecthub."VotersInfoEC" 
+set "Ec_VillageKey" = 195865
+where "Ec_ACKey" = 3186 and "Ec_MandalKey" =5318 and "Ec_VillageKey" = 586116;
+
+update connecthub."VotersInfoEC" 
+set "Ec_VillageKey" = 195857
+where "Ec_ACKey" = 3186 and "Ec_MandalKey" =5318 and "Ec_VillageKey" = 209008;
+
+update connecthub."VotersInfoEC" 
+set "Ec_VillageKey" = 195859
+where "Ec_ACKey" = 3186 and "Ec_MandalKey" =5318 and "Ec_VillageKey" = 204653;
+
+update connecthub."VotersInfoEC" 
+set "Ec_VillageKey" = 195858
+where "Ec_ACKey" = 3186 and "Ec_MandalKey" =5318 and "Ec_VillageKey" = 198772;
+
+update connecthub."VotersInfoEC" 
+set "Ec_VillageKey" = 196227
+where "Ec_ACKey" = 3186 and "Ec_MandalKey" =5323 and "Ec_VillageKey" = 589551;
+
+update connecthub."VotersInfoEC" 
+set "Ec_Name" = concat(case when "Ec_First_Name" = 'NULL' then null else "Ec_First_Name" end, case when "Ec_Last_Name" = 'NULL' then null else "Ec_Last_Name" end);
+
+
+INSERT INTO masters."RelationTypes"
+("ClientKey", "RelationTypeKey", "RelationOf")
+select unnest(array[1,1,1,1,3,3,3,3,4,4,4,4]), unnest(array[5,6,7,8,5,6,7,8,5,6,7,8]), unnest(array['F/o','M/o','H/o','C/o','F/o','M/o','H/o','C/o','F/o','M/o','H/o','C/o']);
+
+
+DROP FUNCTION connecthub."CalculateQualityScore";
+
+CREATE OR REPLACE FUNCTION connecthub."CalculateQualityScore"(_requestorfirstname character varying, _requestorlastname character varying, _age integer, _gender character varying, _mobile character varying, _constituencykey integer, _mandalkey integer, _villagekey integer, _relationtype character varying, _relationname character varying, _voterid character varying, _caste character varying)
+ RETURNS json
+ LANGUAGE plpgsql
+AS $function$
+declare
+-- variable declaration
+	_return json;
+	_score int := 100;
+	_message text:='';
+
+--exception variables
+    _state   TEXT;
+    _msg     TEXT;
+    _detail  TEXT;
+    _hint    TEXT;
+    _context TEXT;
+begin
+	
+		if _Mobile !~ '^[6789][0-9]{9}$' then 
+
+			_score := _score - 10;
+			_message := _message||' ,Invalid Mobile';
+
+		end if;
+
+		if lower(_Gender) not in (select distinct lower("text") from masters."Gender_Lang") then 
+
+			_score := _score - 5;
+			_message := _message||' ,Invalid Gender';
+
+		end if;
+
+		if _Age not between 18 and 110 then 
+
+			_score := _score - 5;
+			_message := _message||' ,Invalid Age';
+
+		end if;
+
+		if _ConstituencyKey is null then 
+
+			_score := _score - 5;
+			_message := _message||' ,Missing Constituency Details';
+
+		end if;
+
+		if _MandalKey is null then 
+
+			_score := _score - 5;
+			_message := _message||' ,Missing Mandal Details';
+
+		end if;
+
+		if _VillageKey is null then 
+
+			_score := _score - 5;
+			_message := _message||' ,Missing Village Details';
+
+		end if;
+
+		if _VoterID !~  '^[A-Za-z]{1,}[A-Za-z0-9]{9}$' then
+
+			_score := _score - 5;
+			_message := _message||' ,Invalid VoterID';
+
+		end if;
+
+	--	if _VoterID !~  '^[A-Za-z]{1,}[A-Za-z0-9]{9}$' then
+	--
+	--		_score := _score - 5;
+	--		_message := _message||' ,Invalid VoterID';
+	--
+	--	end if;
+
+	--	if _RequestorFirstName !~  '^[A-Za-z ]{3,}$' then
+		if _RequestorFirstName !~  '^[A-Za-z]+( [A-Za-z]+)*$' then
+
+			_score := _score - 10;
+			_message := _message||' ,Invalid First Name';
+
+		end if;
+
+	--	if _RequestorLastName !~  '^[A-Za-z ]{3,}$' then
+		if _RequestorLastName !~  '^[A-Za-z]+( [A-Za-z]+)*$' then
+
+			_score := _score - 10;
+			_message := _message||' ,Invalid Last Name';
+
+		end if;
+
+	--	if _RelationName !~  '^[A-Za-z ]{3,}$' then
+		if _RelationName !~  '^[A-Za-z]+( [A-Za-z]+)*$' then
+
+			_score := _score - 10;
+			_message := _message||' ,Invalid Relation Name';
+
+		end if;
+
+		if lower(_RelationType) not in (select distinct lower("RelationOf") from masters."RelationTypes" rtl where "RelationTypeKey" <> 4) then
+
+			_score := _score - 10;
+			_message := _message||' ,Invalid Relation';
+
+		end if;
+
+		if _caste = '' or _caste IS NULL OR lower(_Caste) not in (select distinct lower("SubCaste") from masters."CasteList") then
+
+			_score := _score - 15;
+			_message := _message||' ,Caste should not be empty/special characters';
+
+		end if;
+
+
+	select json_build_object('Score',_score,'Comments',trim(leading _message,' ,')) into _return;
+	
+return _return;
+	
+end;
+$function$
+;
+
+
+DROP PROCEDURE connecthub."UpdateQualityScoreComments";
+
+CREATE OR REPLACE PROCEDURE connecthub."UpdateQualityScoreComments"(IN _clientkey integer)
+ LANGUAGE plpgsql
+AS $procedure$
+BEGIN
+    -- Perform the batch update in one go using a CTE
+    WITH updated_data AS (
+        SELECT 
+            rec."Ec_ID",
+            rec."Ec_VoterId",
+            (response->>'Score')::INT AS "Ec_QualityScore",
+            response->>'Comments' AS "InvalidComments"
+        FROM (
+            SELECT
+                "Ec_First_Name", "Ec_Last_Name", "Ec_Age", "Ec_Gender", "Ec_Mobile", 
+                "Ec_ACKey", "Ec_MandalKey", "Ec_VillageKey", "Ec_Relation", "Ec_RelationName",
+                "Ec_VoterId", "Ec_Caste", "Ec_ID",
+                connecthub."CalculateQualityScore"(
+                    COALESCE(a."RequestorFirstName", a."Ec_First_Name", ''::text)::character varying, 
+					COALESCE(a."RequestorLastName", a."Ec_Last_Name", ''::text)::character varying,
+				    COALESCE(a."Age"::bigint, a."Ec_Age")::int,
+				    COALESCE(a."Gender", a."Ec_Gender", ''::text)::character varying,
+					COALESCE(a."Mobile", a."Ec_Mobile", ''::text)::character varying,
+					COALESCE(a."ConstituencyKey"::bigint, a."Ec_ACKey")::int,
+				    COALESCE(a."MandalKey", a."Ec_MandalKey")::int,
+				    COALESCE(a."VillageKey", a."Ec_VillageKey")::int,
+                    COALESCE(a."RelationType",
+			        CASE
+			            WHEN a."Ec_Relation" = 'father'::text AND COALESCE(a."Gender", a."Ec_Gender") = 'Male'::text THEN 'S/O'::text
+			            WHEN a."Ec_Relation" = 'father'::text AND COALESCE(a."Gender", a."Ec_Gender") = 'Female'::text THEN 'D/O'::text
+			            WHEN a."Ec_Relation" = 'husband'::text THEN 'W/O'::text
+			            WHEN a."Ec_Relation" = 'mother'::text AND COALESCE(a."Gender", a."Ec_Gender") = 'Male'::text THEN 'S/O'::text
+			            WHEN a."Ec_Relation" = 'mother'::text AND COALESCE(a."Gender", a."Ec_Gender") = 'FeMale'::text THEN 'D/O'::text
+			            WHEN a."Ec_Relation" = 'others'::text AND COALESCE(a."Gender", a."Ec_Gender") = 'Male'::text THEN 'Others'::text
+			            WHEN a."Ec_Relation" = 'daughter'::text AND COALESCE(a."Gender", a."Ec_Gender") = 'Male'::text THEN 'F/O'::text
+			            WHEN a."Ec_Relation" = 'daughter'::text AND COALESCE(a."Gender", a."Ec_Gender") = 'FeMale'::text THEN 'M/O'::text
+			            WHEN a."Ec_Relation" = 'wife'::text THEN 'H/O'::text
+			            WHEN a."Ec_Relation" = 'son'::text AND COALESCE(a."Gender", a."Ec_Gender") = 'Male'::text THEN 'F/O'::text
+			            WHEN a."Ec_Relation" = 'son'::text AND COALESCE(a."Gender", a."Ec_Gender") = 'FeMale'::text THEN 'M/O'::text
+			            ELSE NULL::text
+			        END)::character varying, 
+                    COALESCE(a."RelationName", a."Ec_RelationName", ''::text)::character varying, 
+                    COALESCE(a."VoterID", a."Ec_VoterId")::character varying, 
+                    CASE
+			            WHEN a."Caste" = ''::text THEN a."Ec_Caste"
+			            ELSE a."Caste"
+			        END::character varying
+                ) AS response
+            FROM connecthub."VotersInfoEC" a
+            WHERE "Ec_ClientKey" = _clientkey
+        ) rec
+    )
+    -- Batch update using the data from the CTE
+    UPDATE connecthub."VotersInfoEC" AS ec
+    SET 
+        "QualityScore" = updated_data."Ec_QualityScore",
+        "InvalidComments" = updated_data."InvalidComments"
+    FROM updated_data
+    WHERE ec."Ec_ID" = updated_data."Ec_ID"
+      AND ec."Ec_VoterId" = updated_data."Ec_VoterId"
+      AND ec."Ec_ClientKey" = _clientkey;
+END $procedure$
+;
+
+call connecthub."UpdateQualityScoreComments"(1);
+
+call connecthub."UpdateQualityScoreComments"(3);
+
+call connecthub."UpdateQualityScoreComments"(4);
+
+CREATE OR REPLACE FUNCTION connecthub.fn_whatsapp_details(_clientkey integer, _lang character, _grievancekey character varying)
+ RETURNS json
+ LANGUAGE plpgsql
+AS $function$
+declare 
+
+    _return json;
+--exception variables
+    _state   TEXT;
+    _msg     TEXT;
+    _detail  TEXT;
+    _hint    TEXT;
+    _context TEXT;
+
+begin
+	
+if _grievancekey like 'REQ%' then
+	
+	select json_agg(json_build_object('GrievanceKey',"GrievanceKey",'Mobile',"MobileNumbers",'Name',"FullName",'Template',"message"))
+	into _return
+	from (
+	select "GrievanceKey" , array_agg("MobileNumbers") "MobileNumbers", array_agg(concat(coalesce("FirstName",''),' ',coalesce("LastName",''))) as "FullName", message  
+	from (
+	select "GrievanceKey", (json_array_elements("RequestedByInfo")->'data'->>'Mobile') "MobileNumbers"
+	, (json_array_elements("RequestedByInfo")->'data'->>'RequestorFirstName') "FirstName", (json_array_elements("RequestedByInfo")->'data'->>'RequestorLastName') "LastName"
+	, message
+	from connecthub."GrievanceInfo" gi 
+	left join connecthub.whatsapp_trigger_templates wt 
+	on gi."GrievanceStatus" = wt.status_key 
+	where gi."Source" = 'Meenestham'
+	and "GrievanceKey" = _grievancekey
+	and tag = 'General Public'
+	) a
+	group  by "GrievanceKey", message
+	) a;
+
+else 
+
+	select json_agg(json_build_object('GrievanceKey',"TaskId",'Mobile',"MobileNumbers",'Name',"FullName",'Template',"message"))
+	into _return
+	from (
+	select "TaskId" , array_agg("MobileNumbers") "MobileNumbers", array_agg(concat(coalesce("FirstName",''),' ',coalesce("LastName",''))) as "FullName", message  
+	from (
+	select "TaskId", replace("Contact",'+91','') "MobileNumbers"
+	, "UserName" "FirstName", '' "LastName"
+	, message
+	from connecthub."Task" gi 
+	left join connecthub.whatsapp_trigger_templates wt 
+	on 9999 = wt.status_key 
+	left join connecthub."UserInfo" ui 
+	on gi."ClientKey" = ui."ClientKey" and ui."UserKey" = gi."AssignedTo"::text
+	where "TaskId" = _grievancekey
+	and tag = 'PA'
+	) a
+	group  by "TaskId", message
+	) a;
+
+end if;
+
+	_return:= json_build_object('Status','Success', 'Details', _return);
+
+return _return;
+
+exception when others then 
+
+    get stacked diagnostics
+        _state   = returned_sqlstate,
+        _msg     = message_text,
+        _detail  = pg_exception_detail,
+        _hint    = pg_exception_hint,
+        _context = pg_exception_context;
+       
+     insert into connecthub."EXCEPTION_LOG" ("procedure", "state","msg", "detail", "hint", "context")
+     values('fn_whatsapp_details', _state, _msg, _detail, _hint, _context);
+    
+	_return = json_build_object('Status','Failed','Details', json_build_object('State',_state, '_msg', _msg , '_detail', _detail, '_hint', _detail, '_context', _context));
+--  
+	return _return;
+
+end; $function$
+;
