@@ -542,7 +542,13 @@ INSERT INTO "masters"."TaskCategory" ("ClientKey", "Lang", "TaskCategoryID", "Ta
 VALUES
     (1, 'en', 1, 'Personal'),
     (1, 'en', 2, 'Constituency'),
-    (1, 'en', 3, 'Party');
+    (1, 'en', 3, 'Party'),
+    (3, 'en', 1, 'Personal'),
+    (3, 'en', 2, 'Constituency'),
+    (3, 'en', 3, 'Party'),
+    (4, 'en', 1, 'Personal'),
+    (4, 'en', 2, 'Constituency'),
+    (4, 'en', 3, 'Party');
    
  DROP FUNCTION if exists connecthub."ProcGetTaskCategory"(int4, bpchar, varchar);
 
